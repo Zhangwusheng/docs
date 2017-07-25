@@ -8,3 +8,7 @@ https://ramcloud.stanford.edu/~ongaro/userstudy/paxos.pdf
 
 http://mesos.apache.org/documentation/latest/replicated-log-internals/
 
+#LevelDB
+
+http://blog.1feng.me/
+
