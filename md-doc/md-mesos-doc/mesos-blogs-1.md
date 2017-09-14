@@ -8,7 +8,7 @@ A key capability that makes Apache Mesos a viable uber resource manager for the 
 
 We will be walking through the role of the Mesos resource allocation module, how it decides what resources to offer to which frameworks, and how it reclaims resources when necessary.  But let’s start by reviewing the task scheduling process in Mesos:
 
-![MacDown Screenshot](file:///Users/zhangwusheng/Documents/mesos-framework-example1.jpg)
+![MacDown Screenshot](file:///Users/zhangwusheng/Documents//GitHub/docs/md-doc/mesos-framework-example1.jpg)
 
 
 
@@ -25,18 +25,18 @@ For those reasons, most users default to Dominant Resource Fairness, a modified 
 
 The goal of DRF is to ensure that each user, a framework in the case of Mesos, in a heterogeneous environment receives a fair share of the resource most needed by that user/framework.  To grasp DRF, you need to understand the concepts of dominant resource and dominant share.  A framework’s dominant resource is the resource type (CPU, RAM, etc.) that is most in demand by that framework, as a percentage of available resources presented to it by a given resource offer.  For example, a task that is computation-heavy will have CPU as its framework’s dominant resource while a task that relies on in-memory calculations may have RAM as its framework’s dominant resource.  As frameworks are allocated resources, DRF tracks the percentages of shares that each framework owns for a given resource type; the highest percentage of shares owned across all resource types for a given framework is that framework’s dominant share.  The DRF algorithm uses the dominant share of all registered frameworks to ensure that each framework receives a fair share of its dominant resource.
 
-![MacDown Screenshot](file:///Users/zhangwusheng/Documents/mesod_screenshot_20150407_at_949_36_pm.png）
+![MacDown Screenshot](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/md-mesos-doc/mesod_screenshot_20150407_at_949_36_pm.png）
 
 Too abstract a concept?  Let’s illustrate with an example.  Assume you have a resource offer that consists of 9 CPUs and 18 GB of RAM.  Framework 1 runs tasks that require (1 CPU, 4 GB RAM) and framework 2 runs tasks that require (3 CPUs, 1 GB RAM).  Each framework 1 task will consume 1/9 of the total CPU and 2/9 of the total RAM, making RAM framework 1’s dominant resource.  Likewise, each framework 2 task will consume 1/3 of the total CPU and 1/18 of the total RAM, making CPU framework 2’s dominant resource.  DRF will attempt to give each framework an equal amount of their dominant resource, as represented by their dominant share.  In this example, DRF will work with the frameworks to allocate the following – three tasks to framework 1 for a total allocation of (3 CPUs, 12 GB RAM) and 2 tasks to framework 2 for a total allocation of (6 CPUs, 2 GB RAM).  In this case, each framework ends up with the same dominant share (2/3 or 67%) for each framework’s dominant resource (RAM for framework 1 and CPU for framework 2) before there is not enough available resources, in this particular offer, to run additional tasks.  Note that if framework 1, for example, only had 2 tasks that needed to be run, then framework 2 and any other registered frameworks would have received all left over resources.
 
-![MacDown Screenshot](file:///Users/zhangwusheng/Documents/mesod_screenshot_20150407_at_949_36_pm.png)
+![MacDown Screenshot](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/md-mesos-doc/mesod_screenshot_20150407_at_949_36_pm.png)
 
 So how does DRF work to produce the outcome above?  As stated earlier, the DRF allocation module tracks the resources allocated to each framework and each framework’s dominant share.  At each step, DRF presents resource offers to the framework with the lowest dominant share among all frameworks with tasks to run.  The framework will accept the offer if there are enough available resources to run its task.  Using the example taken from the DRF papers cited earlier and modified for this blog post, I will walk through each step taken by the DRF algorithm.  To keep things simple, the example I use do not factor in resources that are released back to the pool after a short-running task is complete, I assume there is an infinite number of tasks to be run for each framework, and I assume that every resource offer is accepted.
 
 If you recall from above, we assume you have a resource offer that consists of 9 CPUs and 18 GB of RAM.  Framework 1 runs tasks that require (1 CPU, 4 GB RAM) and framework 2 runs tasks that require (3 CPUs, 1 GB RAM).  Each framework 1 task will consume 1/9 of the total CPU and 2/9 of the total RAM, making RAM framework 1’s dominant resource.  Again, each framework 2 task will consume 1/3 of the total CPU and 1/18 of the total RAM, making CPU framework 2’s dominant resource.
 
 
-![MacDown Screenshot](file:///Users/zhangwusheng/Documents/mesos-drf1.jpg)
+![MacDown Screenshot](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/md-mesos-doc/mesos-drf1.jpg)
 
 Each row provides the following information:
 
@@ -102,13 +102,13 @@ Framework 1的每个任务会消耗CPU总数的1/9、内存总数的2/9，因此
 
 此时，每个Framework的主导资源（Framework 1的内存和Framework 2的CPU）最终得到相同的主导份额（2/3或67％），这样提供给两个Framework后，将没有足够的可用资源运行其他任务。需要注意的是，如果Framework 1中仅有两个任务需要被运行，那么Framework 2以及其他已注册的Framework将收到的所有剩余的资源。
 
-![MacDown Screenshot](file:///Users/zhangwusheng/Documents/mesod_screenshot_20150407_at_949_36_pm.png)
+![MacDown Screenshot](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/md-mesos-doc/mesod_screenshot_20150407_at_949_36_pm.png)
 
 那么，DRF是怎样计算而产生上述结果的呢？如前所述，DRF分配模块跟踪分配给每个Framework的资源和每个框架的主导份额。每次，DRF以所有Framework中运行的任务中最低的主导份额作为资源邀约发送给Framework。如果有足够的可用资源来运行它的任务，Framework将接受这个邀约。通过前面引述的DRF论文中的示例，我们来贯穿DRF算法的每个步骤。为了简单起见，示例将不考虑短任务完成后，资源被释放回资源池中这一因素，我们假设每个Framework会有无限数量的任务要运行，并认为每个资源邀约都会被接受。
 
 回顾上述示例，假设有一个资源邀约包含9核CPU和18GB内存。Framework 1运行的任务需要（1核CPU、4GB内存），Framework 2运行的任务需要（3核CPU、2GB内存）。Framework 1的任务会消耗CPU总数的1/9、内存总数的2/9，Framework 1的主导资源是内存。同样，Framework 2的每个任务会CPU总数的1/3、内存总数的1/18，Framework 2的主导资源是CPU。
 
-![MacDown Screenshot](file:///Users/zhangwusheng/Documents/mesos-drf1.jpg)
+![MacDown Screenshot](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/md-mesos-doc/mesos-drf1.jpg)
 
 
 上面表中的每一行提供了以下信息：
