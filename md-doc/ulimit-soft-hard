@@ -1,0 +1,11 @@
+Could you tell me what it’s the difference between hard and soft limits?
+People told me soft is like warning and hard is real max limit, but I’m not sure
+
+
+vivek
+
+Yup, you are correct about soft and hard limit. For example, following will prevent anyone in the student group from having more than 50 processes, and a warning will be given at 30 processes.
+
+@student soft nproc 30
+@student hard nproc 50
+
