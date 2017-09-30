@@ -24,3 +24,6 @@ http://blog.sina.com.cn/s/blog_6c46cb8601016gnk.html
 #Epoll
 http://blog.csdn.net/caiyaodeng/article/details/52297691
 http://blog.csdn.net/CAIYAODENG/article/details/52312892
+
+#ZeroCopy
+https://www.ibm.com/developerworks/linux/library/j-zerocopy/

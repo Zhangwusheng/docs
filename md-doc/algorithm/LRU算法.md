@@ -9,7 +9,7 @@ http://flychao88.iteye.com/blog/1977653
 LRU（Least recently used，最近最少使用）算法根据数据的历史访问记录来进行淘汰数据，其核心思想是“如果数据最近被访问过，那么将来被访问的几率也更高”。
 ### 1.2 实现
 最常见的实现是使用一个链表保存缓存数据，详细算法实现如下：
-![haroopad icon](file:///Users/zhangwusheng/Documents/md-doc/algorithm/lru-1.png)
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/lru-1.png)
 
 * 新数据插入到链表头部；
 * 每当缓存命中（即缓存数据被访问），则将数据移到链表头部；
@@ -30,7 +30,7 @@ LRU（Least recently used，最近最少使用）算法根据数据的历史访�
 LRU-K中的K代表最近使用的次数，因此LRU可以认为是LRU-1。LRU-K的主要目的是为了解决LRU算法“缓存污染”的问题，其核心思想是将“最近使用过1次”的判断标准扩展为“最近使用过K次”。
 ###实现
 相比LRU，LRU-K需要多维护一个队列，用于记录所有缓存数据被访问的历史。只有当数据的访问次数达到K次的时候，才将数据放入缓存。当需要淘汰数据时，LRU-K会淘汰第K次访问时间距当前时间最大的数据。详细实现如下：
-![haroopad icon](file:///Users/zhangwusheng/Documents/md-doc/algorithm/lru-2.png)
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/lru-2.png)
 
 1.数据第一次被访问，加入到访问历史列表；
 2.如果数据在访问历史列表里后没有达到K次访问，则按照一定规则（FIFO，LRU）淘汰；
@@ -56,7 +56,7 @@ Two queues（以下使用2Q代替）算法类似于LRU-2，不同点在于2Q将L
 ###实现
 当数据第一次访问时，2Q算法将数据缓存在FIFO队列里面，当数据第二次被访问时，则将数据从FIFO队列移到LRU队列里面，两个队列各自按照自己的方法淘汰数据。详细实现如下：
 
-![haroopad icon](file:///Users/zhangwusheng/Documents/md-doc/algorithm/lru-3.png)
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/lru-3.png)
 
 1. 新访问的数据插入到FIFO队列；
 2. 如果数据在FIFO队列中一直没有被再次访问，则最终按照FIFO规则淘汰；
@@ -81,7 +81,7 @@ MQ算法根据访问频率将数据划分为多个队列，不同的队列具有
 MQ算法将缓存划分为多个LRU队列，每个队列对应不同的访问优先级。访问优先级是根据访问次数计算出来的，例如
 详细的算法结构图如下，Q0，Q1....Qk代表不同的优先级队列，Q-history代表从缓存中淘汰数据，但记录了数据的索引和引用次数的队列：
 
-![haroopad icon](file:///Users/zhangwusheng/Documents/md-doc/algorithm/lru-4.png)
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/lru-4.png)
 
 如上图，算法详细描述如下：
 1. 新插入的数据放入Q0；
