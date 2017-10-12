@@ -1,5 +1,6 @@
 [toc]
 
+
 #Dynamo：Amazon的高可用性的键-值存储系统
 
 Giuseppe DeCandia, Deniz Hastorun, Madan Jampani, Gunavardhan Kakulapati, Avinash Lakshman, Alex Pilchin, Swaminathan Sivasubramanian, Peter Vosshall and Werner Vogels
@@ -9,26 +10,29 @@ Amazon.com
 译文参考 http://www.cnblogs.com/foxmailed/archive/2012/01/11/2318650.html ，稍微做了语句优化
 
 ##摘要
-~~~
+> ~~~cpp
 Reliability at massive scale is one of the biggest challenges we face at Amazon.com, one of the largest e-commerce operations in the world; even the slightest outage has significant financial consequences and impacts customer trust. The Amazon.com platform, which provides services for many web sites worldwide, is implemented on top of an infrastructure of tens of thousands of servers and network components located in many datacenters around the world. At this scale, small and large components fail continuously and the way persistent state is managed in the face of these failures drives the reliability and scalability of the software systems.
 ~~~
+
 ~~~cpp
 巨大规模系统的可靠性是我们在Amazon.com，这个世界上最大的电子商务公司之一，面对最大的挑战之一，即使最轻微的系统中断都会导致明显的经济后果,并且影响到客户对我们的信任。Amazon.com平台，它为全球许多网站服务，建立在成千上万的服务器和网络基础设施之上，而这些服务器和基础设置位于世界各地的许多数据中心。在这种规模下，各种大大小小的部件故障持续不断发生。在面对这些故障时，如何管理持久化的状态，决定了软件系统的可靠性和可扩展性。
 ~~~
  
-~~~
+> ~~~cpp
 This paper presents the design and implementation of Dynamo, a highly available key-value storage system that some of Amazon’s core services use to provide an “always-on” experience. To achieve this level of availability, Dynamo sacrifices consistency under certain failure scenarios. It makes extensive use of object versioning and application-assisted conflict resolution in a manner that provides a novel interface for developers to use.
 ~~~
+
 ~~~cpp
 本文介绍Dynamo的设计和实现，一个高度可用的key-value存储系统，一些Amazon的核心服务使用它用以提供一个“永远在线”的用户体验。为了达到这个级别的可用性，Dynamo在某些故障的场景中将牺牲一致性。它大量使用"对象版本"和"应用程序协助解决冲突"来为开发人员提供一个优雅可用的接口。
 ~~~
 
 
 ## 1.简介
-~~~
+> ~~~cpp
 1. INTRODUCTION
 Amazon runs a world-wide e-commerce platform that serves tens of millions customers at peak times using tens of thousands of servers located in many data centers around the world. There are strict operational requirements on Amazon’s platform in terms of performance, reliability and efficiency, and to support continuous growth the platform needs to be highly scalable. Reliability is one of the most important requirements because even the slightest outage has significant financial consequences and impacts customer trust. In addition, to support continuous growth, the platform needs to be highly scalable.
 ~~~
+
 ~~~cpp
 Amazon运行着一个全球性的电子商务服务平台，在繁忙时段使用位于世界各地的许多数据中心的数千台服务器为几千万的客户服务。Amazon平台有严格的性能，可靠性和效率方面操作要求，并支持持续增长，因此平台需要高度可扩展性。可靠性是最重要的要求之一，因为即使最轻微的系统中断都有显著的经济后果和影响客户的信赖。此外，为了支持持续增长，平台需要高度可扩展性。
 ~~~
@@ -491,125 +495,180 @@ Decentralized failure detection protocols use a simple gossip-style protocol tha
 
 
 ####4.9添加/删除存储节点
+When a new node (say X) is added into the system, it gets assigned a number of tokens that are randomly scattered on the ring. For every key range that is assigned to node X, there may be a number of nodes (less than or equal to N) that are currently in charge of handling keys that fall within its token range. Due to the allocation of key ranges to X, some existing nodes no longer have to some of their keys and these nodes transfer those keys to X. Let us consider a simple bootstrapping scenario where node X is added to the ring shown in Figure 2 between A and B. When X is added to the system, it is in charge of storing keys in the ranges (F, G], (G, A] and (A, X]. As a consequence, nodes B, C and D no longer have to store the keys in these respective ranges. Therefore, nodes B, C, and D will offer to and upon confirmation from X transfer the appropriate set of keys. When a node is removed from the system, the reallocation of keys happens in a reverse process.
+
 当一个新的节点(例如X)添加到系统中时，它被分配一些随机散落在环上的Token。对于每一个分配给节点X的key range，当前负责处理落在其key range中的key的节点数可能有好几个(小于或等于N)。由于key range的分配指向X，一些现有的节点不再需要存储他们的一部分key，这些节点将这些key传给X，让我们考虑一个简单的引导(bootstrapping)场景，节点X被添加到图2所示的环中A和B之间，当X添加到系统，它负责的key范围为(F,G]，(G，A]和(A，X]。因此，节点B,C和D都各自有一部分不再需要储存key范围(在X加入前，B负责(F,G], (G,A], (A,B]; C负责(G,A], (A,B], (B,C]; D负责(A,B], (B,C], (C,D]。而在X加入后，B负责(G,A], (A,X], (X,B]; C负责(A,X], (X,B], (B,C]; D负责(X,B], (B,C], (C,D])。因此，节点B，C和D，当收到从X来的确认信号时将供出(offer)适当的key。当一个节点从系统中删除，key的重新分配情况按一个相反的过程进行。
+
+Operational experience has shown that this approach distributes the load of key distribution uniformly across the storage nodes, which is important to meet the latency requirements and to ensure fast bootstrapping. Finally, by adding a confirmation round between the source and the destination, it is made sure that the destination node does not receive any duplicate transfers for a given key range.
 
 实际经验表明，这种方法可以将负载均匀地分布到存储节点，其重要的是满足了延时要求，且可以确保快速引导。最后，在源和目标间增加一轮确认(confirmation round)以确保目标节点不会重复收到任何一个给定的key range转移。
 
  
 
-5实现
+##5.实现
+In Dynamo, each storage node has three main software components: request coordination, membership and failure detection, and a local persistence engine. All these components are implemented in Java.
 在dynamo中，每个存储节点有三个主要的软件组件：请求协调，成员(membership)和故障检测，以及本地持久化引擎。所有这些组件都由Java实现。
 
+Dynamo’s local persistence component allows for different storage engines to be plugged in. Engines that are in use are Berkeley Database (BDB) Transactional Data Store2, BDB Java Edition, MySQL, and an in-memory buffer with persistent backing store. The main reason for designing a pluggable persistence component is to choose the storage engine best suited for an application’s access patterns. For instance, BDB can handle objects typically in the order of tens of kilobytes whereas MySQL can handle objects of larger sizes. Applications choose Dynamo’s local persistence engine based on their object size distribution. The majority of Dynamo’s production instances use BDB Transactional Data Store.
 Dynamo的本地持久化组件允许插入不同的存储引擎，如：Berkeley数据库(BDB版本)交易数据存储，BDB Java版，MySQL，以及一个具有持久化后备存储的内存缓冲。设计一个可插拔的持久化组件的主要理由是要按照应用程序的访问模式选择最适合的存储引擎。例如，BDB可以处理的对象通常为几十千字节的数量级，而MySQL能够处理更大尺寸的对象。应用根据其对象的大小分布选择相应的本地持久性引擎。生产中，Dynamo多数使用BDB事务处理数据存储。
+
+The request coordination component is built on top of an event- driven messaging substrate where the message processing pipeline is split into multiple stages similar to the SEDA architecture [24]. All communications are implemented using Java NIO channels. The coordinator executes the read and write requests on behalf of clients by collecting data from one or more nodes (in the case of reads) or storing data at one or more nodes (for writes). Each client request results in the creation of a state machine on the node that received the client request. The state machine contains all the logic for identifying the nodes responsible for a key, sending the requests, waiting for responses, potentially doing retries, processing the replies and packaging the response to the client. Each state machine instance handles exactly one client request. For instance, a read operation implements the following state machine: (i) send read requests to the nodes, (ii) wait for minimum number of required responses, (iii) if too few replies were received within a given time bound, fail the request, (iv) otherwise gather all the data versions and determine the ones to be returned and (v) if versioning is enabled, perform syntactic reconciliation and generate an opaque write context that contains the vector clock that subsumes all the remaining versions. For the sake of brevity the failure handling and retry states are left out.
 
 请求协调组成部分是建立在事件驱动通讯基础上的，其中消息处理管道分为多个阶段类似SEDA的结构[24]。所有的通信都使用Java NIO Channels。协调员执行读取和写入：通过收集从一个或多个节点数据(在读的情况下)，或在一个或多个节点存储的数据(写入)。每个客户的请求中都将导致在收到客户端请求的节点上一个状态机的创建。每一个状态机包含以下逻辑：标识负责一个key的节点，发送请求，等待回应，可能的重试处理，加工和包装返回客户端响应。每个状态机实例只处理一个客户端请求。例如，一个读操作实现了以下状态机：(i)发送读请求到相应节点，(ii)等待所需的最低数量的响应，(iii)如果在给定的时间内收到的响应太少，那么请求失败，(iv)否则，收集所有数据的版本，并确定要返回的版本 (v)如果启用了版本控制，执行语法协调，并产生一个对客户端不透明写上下文，其包括一个涵括所有剩余的版本的矢量时钟。为了简洁起见，没有包含故障处理和重试逻辑。
 
+After the read response has been returned to the caller the state machine waits for a small period of time to receive any outstanding responses. If stale versions were returned in any of the responses, the coordinator updates those nodes with the latest version. This process is called read repair because it repairs replicas that have missed a recent update at an opportunistic time and relieves the anti-entropy protocol from having to do it.
+
 在读取响应返回给调用方后，状态机等待一小段时间以接受任何悬而未决的响应。如果任何响应返回了过时了的(stale)的版本，协调员将用最新的版本更新这些节点(当然是在后台了)。这个过程被称为读修复(read repair)，因为它是用来修复一个在某个时间曾经错过更新操作的副本，同时read repair可以消除不必的反熵操作。
+
+As noted earlier, write requests are coordinated by one of the top N nodes in the preference list. Although it is desirable always to have the first node among the top N to coordinate the writes thereby serializing all writes at a single location, this approach has led to uneven load distribution resulting in SLA violations. This is because the request load is not uniformly distributed across objects. To counter this, any of the top N nodes in the preference list is allowed to coordinate the writes. In particular, since each write usually follows a read operation, the coordinator for a write is chosen to be the node that replied fastest to the previous read operation which is stored in the context information of the request. This optimization enables us to pick the node that has the data that was read by the preceding read operation thereby increasing the chances of getting “read-your-writes” consistency. It also reduces variability in the performance of the request handling which improves the performance at the 99.9 percentile.
 
 如前所述，写请求是由首选列表中某个排名前N的节点来协调的。虽然总是选择前N节点中的第一个节点来协调是可以的，但在单一地点序列化所有的写的做法会导致负荷分配不均，进而导致违反SLA。为了解决这个问题，首选列表中的前N的任何节点都允许协调。特别是，由于写通常跟随在一个读操作之后，写操作的协调员将由节点上最快答复之前那个读操作的节点来担任，这是因为这些信息存储在请求的上下文中(指的是write操作的请求)。这种优化使我们能够选择那个存有同样被之前读操作使用过的数据的节点，从而提高“读你的写”(read-your-writes)一致性(译：我不认为这个描述是有道理的，因为作者这里描述明明是write-follows-read,要了解read-your-writes一致性的读者参见作者另一篇文章:eventually consistent)。它也减少了为了将处理请求的性能提高到99.9百分位时性能表现的差异。
 
- 
 
-6经验与教训
+#6.经验与教训
+
+Dynamo is used by several services with different configurations. These instances differ by their version reconciliation logic, and read/write quorum characteristics. The following are the main patterns in which Dynamo is used:
+* Business logic specific reconciliation: This is a popular use case for Dynamo. Each data object is replicated across multiple nodes. In case of divergent versions, the client application performs its own reconciliation logic. The shopping cart service discussed earlier is a prime example of this category. Its business logic reconciles objects by merging different versions of a customer’s shopping cart.
+
+* Timestamp based reconciliation: This case differs from the previous one only in the reconciliation mechanism. In case of divergent versions, Dynamo performs simple timestamp based reconciliation logic of “last write wins”; i.e., the object with the largest physical timestamp value is chosen as the correct version. The service that maintains customer’s session information is a good example of a service that uses this mode.
+
+* High performance read engine: While Dynamo is built to be an “always writeable” data store, a few services are tuning its quorum characteristics and using it as a high performance read engine. Typically, these services have a high read request rate and only a small number of updates. In this configuration, typically R is set to be 1 and W to be N. For these services, Dynamo provides the ability to partition and replicate their data across multiple nodes thereby offering incremental scalability. Some of these instances function as the authoritative persistence cache for data stored in more heavy weight backing stores. Services that maintain product catalog and promotional items fit in this category.
+
+
 Dynamo由几个不同的配置的服务使用。这些实例有着不同的版本协调逻辑和读/写仲裁(quorum)的特性。以下是Dynamo的主要使用模式：
 
-业务逻辑特定的协调：这是一个普遍使用的Dynamo案例。每个数据对象被复制到多个节点。在版本发生分岔时，客户端应用程序执行自己的协调逻辑。前面讨论的购物车服务是这一类的典型例子。其业务逻辑是通过合并不同版本的客户的购物车来协调不同的对象。
+* 业务逻辑特定的协调：这是一个普遍使用的Dynamo案例。每个数据对象被复制到多个节点。在版本发生分岔时，客户端应用程序执行自己的协调逻辑。前面讨论的购物车服务是这一类的典型例子。其业务逻辑是通过合并不同版本的客户的购物车来协调不同的对象。
 
-基于时间戳的协调：此案例不同于前一个在于协调机制。在出现不同版本的情况下，Dynamo执行简单的基于时间戳的协调逻辑：“最后的写获胜”，也就是说，具有最大时间戳的对象被选为正确的版本。一些维护客户的会话信息的服务是使用这种模式的很好的例子。
+* 基于时间戳的协调：此案例不同于前一个在于协调机制。在出现不同版本的情况下，Dynamo执行简单的基于时间戳的协调逻辑：“最后的写获胜”，也就是说，具有最大时间戳的对象被选为正确的版本。一些维护客户的会话信息的服务是使用这种模式的很好的例子。
 
-高性能读取引擎：虽然Dynamo被构建成一个“永远可写”数据存储，一些服务通过调整其仲裁的特性把它作为一个高性能读取引擎来使用。通常，这些服务有很高的读取请求速率但只有少量的更新操作。在此配置中，通常R是设置为1，且W为N。对于这些服务，Dynamo提供了划分和跨多个节点的复制能力，从而提供增量可扩展性(incremental scalability)。一些这样的实例被当成权威数据缓存用来缓存重量级后台存储的数据。那些保持产品目录及促销项目的服务适合此种类别。
+* 高性能读取引擎：虽然Dynamo被构建成一个“永远可写”数据存储，一些服务通过调整其仲裁的特性把它作为一个高性能读取引擎来使用。通常，这些服务有很高的读取请求速率但只有少量的更新操作。在此配置中，通常R是设置为1，且W为N。对于这些服务，Dynamo提供了划分和跨多个节点的复制能力，从而提供增量可扩展性(incremental scalability)。一些这样的实例被当成权威数据缓存用来缓存重量级后台存储的数据。那些保持产品目录及促销项目的服务适合此种类别。
 
- 
+The main advantage of Dynamo is that its client applications can tune the values of N, R and W to achieve their desired levels of performance, availability and durability. For instance, the value of N determines the durability of each object. A typical value of N used by Dynamo’s users is 3.
 
 Dynamo的主要优点是它的客户端应用程序可以调的N，R和W的值，以实现其期待的性能, 可用性和耐用性的水平。例如，N的值决定了每个对象的耐久性。Dynamo用户使用的一个典型的N值是3。
 
+The values of W and R impact object availability, durability and consistency. For instance, if W is set to 1, then the system will never reject a write request as long as there is at least one node in the system that can successfully process a write request. However, low values of W and R can increase the risk of inconsistency as write requests are deemed successful and returned to the clients even if they are not processed by a majority of the replicas. This also introduces a vulnerability window for durability when a write request is successfully returned to the client even though it has been persisted at only a small number of nodes.
+
 W和R影响对象的可用性，耐用性和一致性。举例来说，如果W设置为1，只要系统中至少有一个节点活就可以成功地处理一个写请求，那么系统将永远不会拒绝写请求。不过，低的W和R值会增加不一致性的风险，因为写请求被视为成功并返回到客户端，即使他们还未被大多数副本处理。这也引入了一个耐用性漏洞(vulnerability)窗口：即使它只是在少数几个节点上持久化了但写入请求成功返回到客户端。
+
+Traditional wisdom holds that durability and availability go hand- in-hand. However, this is not necessarily true here. For instance, the vulnerability window for durability can be decreased by increasing W. This may increase the probability of rejecting requests (thereby decreasing availability) because more storage hosts need to be alive to process a write request.
 
 传统的观点认为，耐用性和可用性关系总是非常紧密(hand-in-hand手牵手^-^)。但是，这并不一定总是真的。例如，耐用性漏洞窗口可以通过增加W来减少，但这将增加请求被拒绝的机率(从而减少可用性)，因为为处理一个写请求需要更多的存储主机需要活着。
 
-被好几个Dynamo实例采用的(n，R，W)配置通常为(3,2,2)。选择这些值是为满足性能，耐用性，一致性和可用性SLAs的需求。
+The common (N,R,W) configuration used by several instances of Dynamo is (3,2,2). These values are chosen to meet the necessary levels of performance, durability, consistency, and availability SLAs.
+
+被好几个Dynamo实例采用的(N，R，W)配置通常为(3,2,2)。选择这些值是为满足性能，耐用性，一致性和可用性SLAs的需求。
+
+All the measurements presented in this section were taken on a live system operating with a configuration of (3,2,2) and running a couple hundred nodes with homogenous hardware configurations. As mentioned earlier, each instance of Dynamo contains nodes that are located in multiple datacenters. These datacenters are typically connected through high speed network links. Recall that to generate a successful get (or put) response R (or W) nodes need to respond to the coordinator. Clearly, the network latencies between datacenters affect the response time and the nodes (and their datacenter locations) are chosen such that the applications target SLAs are met.
 
 所有在本节中测量的是一个在线系统，其工作在(3,2,2)配置并运行在几百个同质硬件配置上。如前所述，每一个实例包含位于多个数据中心的Dynamo节点。这些数据中心通常是通过高速网络连接。回想一下，产生一个成功的get(或put)响应，R(或W)个节点需要响应协调员。显然，数据中心之间的网络延时会影响响应时间，因此节点(及其数据中心位置)的选择要使得应用的目标SLAs得到满足。
 
-6.1平衡性能和耐久性
+##6.1平衡性能和耐久性
+
+While Dynamo’s principle design goal is to build a highly available data store, performance is an equally important criterion in Amazon’s platform. As noted earlier, to provide a consistent customer experience, Amazon’s services set their performance targets at higher percentiles (such as the 99.9th or 99.99th percentiles). A typical SLA required of services that use Dynamo is that 99.9% of the read and write requests execute within 300ms.
+
 虽然Dynamo的主要的设计目标是建立一个高度可用的数据存储，性能是在Amazon平台中是一个同样重要的衡量标准。如前所述，为客户提供一致的客户体验，Amazon的服务定在较高的百分位(如99.9或99.99)，一个典型的使用Dynamo的服务的SLA要求99.9％的读取和写入请求在300毫秒内完成。
+
+Since Dynamo is run on standard commodity hardware components that have far less I/O throughput than high-end enterprise servers, providing consistently high performance for read and write operations is a non-trivial task. The involvement of multiple storage nodes in read and write operations makes it even more challenging, since the performance of these operations is limited by the slowest of the R or W replicas. Figure 4 shows the average and 99.9th percentile latencies of Dynamo’s read and write operations during a period of 30 days. As seen in the figure, the latencies exhibit a clear diurnal pattern which is a result of the diurnal pattern in the incoming request rate (i.e., there is a significant difference in request rate between the daytime and night). Moreover, the write latencies are higher than read latencies obviously because write operations always results in disk access. Also, the 99.9th percentile latencies are around 200 ms and are an order of magnitude higher than the averages. This is because the 99.9th percentile latencies are affected by several factors such as variability in request load, object sizes, and locality patterns.
+
 
 由于Dynamo是运行在标准的日用级硬件组件上，这些组件的I/O吞吐量远比不上高端企业级服务器，因此提供一致性的高性能的读取和写入操作并不是一个简单的任务。再加上涉及到多个存​​储节点的读取和写入操作，让我们更加具有挑战性，因为这些操作的性能是由最慢的R或W副本限制的。图4显示了Dynamo为期30天的读/写的平均和99.9百分位的延时。正如图中可以看出，延时表现出明显的昼夜模式这是因为进来的请求速率存在昼夜模式的结果造成的(即请求速率在白天和黑夜有着显着差异)。此外，写延时明显高于读取延时，因为写操作总是导致磁盘访问。此外，99.9百分位的延时大约是200毫秒，比平均水平高出一个数量级。这是因为99.9百分位的延时受几个因素，如请求负载，对象大小和位置格局的变化影响。
 
-图4：读，写操作的平均和99.9百分点延时，2006年12月高峰时的请求。
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/dynamo-4.jpg)
+图4：读，写操作的平均和99.9百分点延时，2006年12月高峰时的请求。在X轴的刻度之间的间隔相当于连续12小时。延时遵循昼夜模式类似请求速率,99.9百分点比平均水平高出一个数量级。
 
-在X轴的刻度之间的间隔相当于连续12小时。
-
-延时遵循昼夜模式类似请求速率
-
-99.9百分点比平均水平高出一个数量级。
-
- 
+While this level of performance is acceptable for a number of services, a few customer-facing services required higher levels of performance. For these services, Dynamo provides the ability to trade-off durability guarantees for performance. In the optimization each storage node maintains an object buffer in its main memory. Each write operation is stored in the buffer and gets periodically written to storage by a writer thread. In this scheme, read operations first check if the requested key is present in the buffer. If so, the object is read from the buffer instead of the storage engine.
 
 虽然这种性能水平是可以被大多数服务所接受，一些面向客户的服务需要更高的性能。针对这些服务，Dynamo能够牺牲持久性来保证性能。在这个优化中，每个存储节点维护一个内存中的对象缓冲区(BigTable 中的memtable)。每次写操作都存储在缓冲区，“写”线程定期将缓冲写到存储中。在这个方案中，读操作首先检查请求的 key 是否存在于缓冲区。如果是这样，对象是从缓冲区读取，而不是存储引擎。
+
+This optimization has resulted in lowering the 99.9th percentile latency by a factor of 5 during peak traffic even for a very small buffer of a thousand objects (see Figure 5). Also, as seen in the figure, write buffering smoothes out higher percentile latencies. Obviously, this scheme trades durability for performance. In this scheme, a server crash can result in missing writes that were queued up in the buffer. To reduce the durability risk, the write operation is refined to have the coordinator choose one out of the N replicas to perform a “durable write”. Since the coordinator waits only for W responses, the performance of the write operation is not affected by the performance of the durable write operation performed by a single replica.
 
 这种优化的结果是99.9百位在流量高峰期间的延时降低达5倍之多，即使是一千个对象(参见图5)的非常小的缓冲区。此外，如图中所示，写缓冲在较高百分位具有平滑延时。显然，这个方案是平衡耐久性来提高性能的。在这个方案中，服务器崩溃可能会导致写操作丢失，即那些在缓冲区队列中的写(还未持久化到存储中的写)。为了减少耐用性风险，更细化的写操作要求协调员选择N副本中的一个执行“持久写”。由于协调员只需等待W个响应(译，这里讨论的这种情况包含W-1个缓冲区写，1个持久化写)，写操作的性能不会因为单一一个副本的持久化写而受到影响。
 
 
 
-
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/dynamo-5.jpg)
 
 图5：24小时内的99.9百分位延时缓冲和非缓冲写的性能比较。在x轴的刻度之间的间隔连续为一小时。
 
- 
 
-6.2确保均匀的负载分布
+###6.2确保均匀的负载分布
+
+Dynamo uses consistent hashing to partition its key space across its replicas and to ensure uniform load distribution. A uniform key distribution can help us achieve uniform load distribution assuming the access distribution of keys is not highly skewed. In particular, Dynamo’s design assumes that even where there is a significant skew in the access distribution there are enough keys in the popular end of the distribution so that the load of handling popular keys can be spread across the nodes uniformly through partitioning. This section discusses the load imbalance seen in Dynamo and the impact of different partitioning strategies on load distribution.
+
 Dynamo采用一致性的散列将key space(键空间)分布在其所有的副本上，并确保负载均匀分布。假设对key的访问分布不会高度偏移，一个统一的key分配可以帮助我们达到均匀的负载分布。特别地, Dynamo设计假定，即使访问的分布存在显着偏移，只要在流行的那端(popular end)有足够多的keys，那么对那些流行的key的处理的负载就可以通过partitioning均匀地分散到各个节点。本节讨论Dynamo中所出现负载不均衡和不同的划分策略对负载分布的影响。
 
- 
 
+To study the load imbalance and its correlation with request load, the total number of requests received by each node was measured for a period of 24 hours - broken down into intervals of 30 minutes. In a given time window, a node is considered to be “in- balance”, if the node’s request load deviates from the average load by a value a less than a certain threshold (here 15%). Otherwise the node was deemed “out-of-balance”. Figure 6 presents the fraction of nodes that are “out-of-balance” (henceforth, “imbalance ratio”) during this time period. For reference, the corresponding request load received by the entire system during this time period is also plotted. As seen in the figure, the imbalance ratio decreases with increasing load. For instance, during low loads the imbalance ratio is as high as 20% and during high loads it is close to 10%. Intuitively, this can be explained by the fact that under high loads, a large number of popular keys are accessed and due to uniform distribution of keys the load is evenly distributed. However, during low loads (where load is 1/8th of the measured peak load), fewer popular keys are accessed, resulting in a higher load imbalance.
 为了研究负载不平衡与请求负载的相关性，通过测量各个节点在24小时内收到的请求总数-细分为30分钟一段。在一个给定的时间窗口，如果该节点的请求负载偏离平均负载没有超过某个阈值(这里15％)，认为一个节点被认为是“平衡的”。否则，节点被认为是“失去平衡”。图6给出了一部分在这段时间内“失去平衡”的节点(以下简称“失衡比例”)。作为参考，整个系统在这段时间内收到的相应的请求负载也被绘制。正如图所示，不平衡率随着负载的增加而下降。例如，在低负荷时，不平衡率高达20％，在高负荷高接近10％。直观地说，这可以解释为，在高负荷时大量流行键(popular key)访问且由于key的均匀分布，负载最终均匀分布。然而，在(其中负载为高峰负载的八分之一)低负载下，当更少的流行键被访问，将导致一个比较高的负载不平衡。
 
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/dynamo-6.jpg)
 
 图6：部分失去平衡的节点(即节点的请求负载高于系统平均负载的某一阈值)和其相应的请求负载。
 
 X轴刻度间隔相当于一个30分钟的时间。
 
- 
+This section discusses how Dynamo’s partitioning scheme has evolved over time and its implications on load distribution.
 
 本节讨论Dynamo的划分方案(partitioning scheme)是如何随着时间和负载分布的影响进行演化的。
 
+Strategy 1: T random tokens per node and partition by token value: This was the initial strategy deployed in production (and described in Section 4.2). In this scheme, each node is assigned T tokens (chosen uniformly at random from the hash space). The tokens of all nodes are ordered according to their values in the hash space. Every two consecutive tokens define a range. The last token and the first token form a range that "wraps" around from the highest value to the lowest value in the hash space. Because the tokens are chosen randomly, the ranges vary in size. As nodes join and leave the system, the token set changes and consequently the ranges change. Note that the space needed to maintain the membership at each node increases linearly with the number of nodes in the system.
+
 策略1：每个节点T个随机Token和基于Token值进行分割：这是最早部署在生产环境的策略(在4.2节中描述)。在这个方案中，每个节点被分配T 个Tokens(从哈希空间随机均匀地选择)。所有节点的token，是按照其在哈希空间中的值进行排序的。每两个连续的Token定义一个范围。最后的Token与最开始的Token构成一区域(range)：从哈希空间中最大值绕(wrap)到最低值。由于Token是随机选择，范围大小是可变的。节点加入和离开系统导致Token集的改变，最终导致ranges的变化，请注意，每个节点所需的用来维护系统的成员的空间与系统中节点的数目成线性关系。
 
+While using this strategy, the following problems were encountered. First, when a new node joins the system, it needs to “steal” its key ranges from other nodes. However, the nodes handing the key ranges off to the new node have to scan their local persistence store to retrieve the appropriate set of data items. Note that performing such a scan operation on a production node is tricky as scans are highly resource intensive operations and they need to be executed in the background without affecting the customer performance. This requires us to run the bootstrapping task at the lowest priority. However, this significantly slows the bootstrapping process and during busy shopping season, when the nodes are handling millions of requests a day, the bootstrapping has taken almost a day to complete. Second, when a node joins/leaves the system, the key ranges handled by many nodes change and the Merkle trees for the new ranges need to be recalculated, which is a non-trivial operation to perform on a production system. Finally, there was no easy way to take a snapshot of the entire key space due to the randomness in key ranges, and this made the process of archival complicated. In this scheme, archiving the entire key space requires us to retrieve the keys from each node separately, which is highly inefficient.
+
 在使用这一策略时，遇到了以下问题。首先，当一个新的节点加入系统时，它需要“窃取”(steal)其他节点的键范围。然而，这些需要移交key ranges给新节点的节点必须扫描他们的本地持久化存储来得到适当的数据项。请注意，在生产节点上执行这样的扫描操作是非常复杂，因为扫描是资源高度密集的操作，他们需要在后台执行，而不至于影响客户的性能。这就要求我们必须将引导工作设置为最低的优先级。然而，这将大大减缓了引导过程，在繁忙的购物季节，当节点每天处理数百万的请求时，引导过程可能需要几乎一天才能完成。第二，当一个节点加入/离开系统，由许多节点处理的key range的变化以及新的范围的MertkleTree需要重新计算，在生产系统上，这不是一个简单的操作。最后，由于key range的随机性，没有一个简单的办法为整个key space做一个快照，这使得归档过程复杂化。在这个方案中，归档整个key space 需要分别检索每个节点的key，这是非常低效的。
+
+The fundamental issue with this strategy is that the schemes for data partitioning and data placement are intertwined. For instance, in some cases, it is preferred to add more nodes to the system in order to handle an increase in request load. However, in this scenario, it is not possible to add nodes without affecting data partitioning. Ideally, it is desirable to use independent schemes for partitioning and placement. To this end, following strategies were evaluated:
+
+Strategy 2: T random tokens per node and equal sized partitions:
+In this strategy, the hash space is divided into Q equally sized partitions/ranges and each node is assigned T random tokens. Q is usually set such that Q >> N and Q >> S*T, where S is the number of nodes in the system. In this strategy, the tokens are only used to build the function that maps values in the hash space to the ordered lists of nodes and not to decide the partitioning. A partition is placed on the first N unique nodes that are encountered while walking the consistent hashing ring clockwise from the end of the partition. Figure 7 illustrates this strategy for N=3. In this example, nodes A, B, C are encountered while walking the ring from the end of the partition that contains key k1. The primary advantages of this strategy are: (i) decoupling of partitioning and partition placement, and (ii) enabling the possibility of changing the placement scheme at runtime.
 
 这个策略的根本问题是，数据划分和数据安置的计划交织在一起。例如，在某些情况下，最好是添加更多的节点到系统，以应对处理请求负载的增加。但是，在这种情况下，添加节点(导致数据安置)不可能不影响数据划分。理想的情况下，最好使用独立划分和安置计划。为此，对以下策略进行了评估：
 
 策略2：每个节点T个随机token和同等大小的分区：在此策略中，节点的哈希空间分为Q个同样大小的分区/范围，每个节点被分配T个随机Token。Q是通常设置使得Q>>N和Q>>S*T，其中S为系统的节点个数。在这一策略中，Token只是用来构造一个映射函数该函数将哈希空间的值映射到一个有序列的节点列表，而不决定分区。分区是放置在从分区的末尾开始沿着一致性hash环顺时针移动遇到的前N个独立的节点上。图7说明了这一策略当N=3时的情况。在这个例子中，节点A，B，C是从分区的末尾开始沿着一致性hash环顺时针移动遇到的包含key K1的节点。这一策略的主要优点是：(i)划分和分区布局脱耦 (ii)使得在运行时改变安置方案成为可能。
 
-图7：三个策略的分区和key的位置。
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/dynamo-7.jpg)
 
-甲，乙，丙描述三个独立的节点，形成keyk1在一致性哈希环上的首选列表(N＝3)。
+图7：三个策略的分区和key的位置。甲，乙，丙描述三个独立的节点，形成keyk1在一致性哈希环上的首选列表(N＝3)。阴影部分表示节点A，B和C形式的首选列表负责的keyrangee。黑色箭头标明各节点的Token的位置。
 
-阴影部分表示节点A，B和C形式的首选列表负责的keyrangee。
+Strategy 3: Q/S tokens per node, equal-sized partitions: Similar to strategy 2, this strategy divides the hash space into Q equally sized partitions and the placement of partition is decoupled from the partitioning scheme. Moreover, each node is assigned Q/S tokens where S is the number of nodes in the system. When a node leaves the system, its tokens are randomly distributed to the remaining nodes such that these properties are preserved. Similarly, when a node joins the system it "steals" tokens from nodes in the system in a way that preserves these properties.
 
-黑色箭头标明各节点的Token的位置。
 
 策略3：每个节点Q/S个Token，大小相等的分区：类似策略2，这一策略空间划分成同样大小为Q的散列分区，以及分区布局(placement of partition)与划分方法(partitioning scheme)脱钩。此外，每个节点被分配Q/S个Token其中S是系统的节点数。当一个节点离开系统，为使这些属性被保留，它的Token随机分发到其他节点。同样，当一个节点加入系统，新节点将通过一种可以保留这种属性的方式从系统的其他节点“偷”Token。
 
- 
-
+The efficiency of these three strategies is evaluated for a system with S=30 and N=3. However, comparing these different strategies in a fair manner is hard as different strategies have different configurations to tune their efficiency. For instance, the load distribution property of strategy 1 depends on the number of tokens (i.e., T) while strategy 3 depends on the number of partitions (i.e., Q). One fair way to compare these strategies is to evaluate the skew in their load distribution while all strategies use the same amount of space to maintain their membership information. For instance, in strategy 1 each node needs to maintain the token positions of all the nodes in the ring and in strategy 3 each node needs to maintain the information regarding the partitions assigned to each node.
 对这三个策略的效率评估使用S=30和N=3配置的系统。然而，以一个比较公平的方式这些不同的策略是很难的，因为不同的策略有不同的配置来调整他们的效率。例如，策略1取决于负荷的适当分配(即T)，而策略3信赖于分区的个数(即Q)。一个公平的比较方式是在所有策略中使用相同数量的空间来维持他们的成员信息时，通过评估负荷分布的偏斜. 例如，策略1每个节点需要维护所有环内的Token位置，策略3每个节点需要维护分配到每个节点的分区信息。
+
+In our next experiment, these strategies were evaluated by varying the relevant parameters (T and Q). The load balancing efficiency of each strategy was measured for different sizes of membership information that needs to be maintained at each node, where Load balancing efficiency is defined as the ratio of average number of requests served by each node to the maximum number of requests served by the hottest node.
 
 在我们的下一个实验，通过改变相关的参数(T 和 Q),对这些策略进行了评价。每个策略的负载均衡的效率是根据每个节点需要维持的成员信息的大小的不同来测量，负载平衡效率是指每个节点服务的平均请求数与最忙(hottest)的节点服务的最大请求数之比。
 
+The results are given in Figure 8. As seen in the figure, strategy 3 achieves the best load balancing efficiency and strategy 2 has the worst load balancing efficiency. For a brief time, Strategy 2 served as an interim setup during the process of migrating Dynamo instances from using Strategy 1 to Strategy 3. Compared to Strategy 1, Strategy 3 achieves better efficiency and reduces the size of membership information maintained at each node by three orders of magnitude. While storage is not a major issue the nodes gossip the membership information periodically and as such it is desirable to keep this information as compact as possible. In addition to this, strategy 3 is advantageous and simpler to deploy for the following reasons: (i) Faster bootstrapping/recovery: Since partition ranges are fixed, they can be stored in separate files, meaning a partition can be relocated as a unit by simply transferring the file (avoiding random accesses needed to locate specific items). This simplifies the process of bootstrapping and recovery. (ii) Ease of archival: Periodical archiving of the dataset is a mandatory requirement for most of Amazon storage services. Archiving the entire dataset stored by Dynamo is simpler in strategy 3 because the partition files can be archived separately. By contrast, in Strategy 1, the tokens are chosen randomly and, archiving the data stored in Dynamo requires retrieving the keys from individual nodes separately and is usually inefficient and slow. The disadvantage of strategy 3 is that changing the node membership requires coordination in order to preserve the properties required of the assignment.
+
 结果示于图8。正如图中看到，策略3达到最佳的负载平衡效率，而策略2最差负载均衡的效率。一个短暂的时期，在将Dynamo实例从策略1到策略3的迁移过程中，策略2曾作为一个临时配置。相对于策略1，策略3达到更好的效率并且在每个节点需要维持的信息的大小规模降低了三个数量级。虽然存储不是一个主要问题，但节点间周期地Gossip成员信息，因此最好是尽可能保持这些信息紧凑。除了这个，策略3有利于且易于部署，理由如下：(i)更快的bootstrapping/恢复：由于分区范围是固定的，它们可以被保存在单独的文件，这意味着一个分区可以通过简单地转移文件并作为一个单位重新安置(避免随机访问需要定位具体项目)。这简化了引导和恢复过程。(ii)易于档案：对数据集定期归档是Amazon存储服务提出的强制性要求。Dynamo在策略3下归档整个数据集很简单，因为分区的文件可以被分别归档。相反，在策略1，Token是随机选取的，归档存储的数据需要分别检索各个节点的key，这通常是低效和缓慢的。策略3的缺点是，为维护分配所需的属性改变节点成员时需要协调，。
 
-图8：比较30个维持相同数量的元数据节的点,N=3的系统不同策略的负载分布效率。
+![haroopad icon](file:///Users/zhangwusheng/Documents/GitHub/docs/md-doc/algorithm/dynamo-8.jpg)
+图8：比较30个维持相同数量的元数据节的点,N=3的系统不同策略的负载分布效率。系统的规模和副本的数量的值是按照我们部署的大多数服务的典型配置。
 
-系统的规模和副本的数量的值是按照我们部署的大多数服务的典型配置。
 
- 
 
-6.3不同版本：何时以及有多少？
+###6.3不同版本：何时以及有多少？
+Divergent Versions: When and How Many?
+
+As noted earlier, Dynamo is designed to tradeoff consistency for availability. To understand the precise impact of different failures on consistency, detailed data is required on multiple factors: outage length, type of failure, component reliability, workload etc. Presenting these numbers in detail is outside of the scope of this paper. However, this section discusses a good summary metric: the number of divergent versions seen by the application in a live production environment.
+
 如前所述，Dynamo被设计成为获得可用性而牺牲了一致性。为了解不同的一致性失败导致的确切影响，多方面的详细的数据是必需的：中断时长，失效类型，组件可靠性，负载量等。详细地呈现所有这些数字超出本文的范围。不过，本节讨论了一个很好的简要的度量尺度：在现场生产环境中的应用所出现的不同版本的数量。
 
+Divergent versions of a data item arise in two scenarios. The first is when the system is facing failure scenarios such as node failures, data center failures, and network partitions. The second is when the system is handling a large number of concurrent writers to a single data item and multiple nodes end up coordinating the updates concurrently. From both a usability and efficiency perspective, it is preferred to keep the number of divergent versions at any given time as low as possible. If the versions cannot be syntactically reconciled based on vector clocks alone, they have to be passed to the business logic for semantic reconciliation. Semantic reconciliation introduces additional load on services, so it is desirable to minimize the need for it.
+
+
 不同版本的数据项出现在两种情况下。首先是当系统正面临着如节点失效故障的情况下, 数据中心的故障和网络分裂。二是当系统的并发处理大量写单个数据项，并且最终多个节点同时协调更新操作。无论从易用性和效率的角度来看，都应首先确保在任何特定时间内不同版本的数量尽可能少。如果版本不能单独通过矢量时钟在语法上加以协调，他们必须被传递到业务逻辑层进行语义协调。语义协调给服务应用引入了额外的负担，因此应尽量减少它的需要。
+
+In our next experiment, the number of versions returned to the shopping cart service was profiled for a period of 24 hours. During this period, 99.94% of requests saw exactly one version; 0.00057% of requests saw 2 versions; 0.00047% of requests saw 3 versions and 0.00009% of requests saw 4 versions. This shows that divergent versions are created rarely.
+
+Experience shows that the increase in the number of divergent versions is contributed not by failures but due to the increase in number of concurrent writers. The increase in the number of concurrent writes is usually triggered by busy robots (automated client programs) and rarely by humans. This issue is not discussed in detail due to the sensitive nature of the story.
 
 在我们的下一个实验中，返回到购物车服务的版本数量是基于24小时为周期来剖析的。在此期间，99.94％的请求恰好看到了1个版本。0.00057％的请求看到2个版本，0.00047％的请求看到3个版本和0.00009％的请求看到4个版本。这表明，不同版本创建的很少。
 
@@ -617,38 +676,66 @@ X轴刻度间隔相当于一个30分钟的时间。
 
  
 
-6.4客户端驱动或服务器驱动协调
+###6.4客户端驱动或服务器驱动协调
+
+As mentioned in Section 5, Dynamo has a request coordination component that uses a state machine to handle incoming requests. Client requests are uniformly assigned to nodes in the ring by a load balancer. Any Dynamo node can act as a coordinator for a read request. Write requests on the other hand will be coordinated by a node in the key’s current preference list. This restriction is due to the fact that these preferred nodes have the added responsibility of creating a new version stamp that causally subsumes the version that has been updated by the write request. Note that if Dynamo’s versioning scheme is based on physical timestamps, any node can coordinate a write request.
+
 如第5条所述，Dynamo有一个请求协调组件，它使用一个状态机来处理进来的请求。客户端的请求均匀分配到环上的节点是由负载平衡器完成的。Dynamo的任何节点都可以充当一个读请求协调员。另一方面，写请求将由key的首选列表中的节点来协调。此限制是由于这一事实－－这些首选节点具有附加的责任：即创建一个新的版本标识，使之与写请求更新的版本建立因果关系(译：呜呜，这个很难！Causally subsumes)。请注意，如果Dynamo的版本方案是建基于物理时间戳(译：一个在本文中没解释的概念：[Timestamp Semantics and Representation]Many database management systems and operating systems provide support for time values. This support is present at both the logical and physical levels. The logical level is the user's view of the time values and the query level operations permitted on those values, while the physical level concerns the bit layout of the time values and the bit level operations on those values. The physical level serves as a platform for the logical level but is inaccessible to the average user.)的话，任何节点都可以协调一个写请求。
+
+An alternative approach to request coordination is to move the state machine to the client nodes. In this scheme client applications use a library to perform request coordination locally. A client periodically picks a random Dynamo node and downloads its current view of Dynamo membership state. Using this information the client can determine which set of nodes form the preference list for any given key. Read requests can be coordinated at the client node thereby avoiding the extra network hop that is incurred if the request were assigned to a random Dynamo node by the load balancer. Writes will either be forwarded to a node in the key’s preference list or can be coordinated locally if Dynamo is using timestamps based versioning.
 
 另一种请求协调的方法是将状态机移到客户端节点。在这个方案中，客户端应用程序使用一个库在本地执行请求协调。客户端定期随机选取一个节点，并下载其当前的Dynamo成员状态视图。利用这些信息,客户端可以从首选列表中为给定的key选定相应的节点集。读请求可以在客户端节点进行协调，从而避免了额外一跳的网络开销(network hop)，比如，如果请求是由负载平衡器分配到一个随机的Dynamo节点，这种情况会招致这样的额外一跳。如果Dynamo使用基于时间戳的版本机制，写要么被转发到在key的首选列表中的节点，也可以在本地协调。
 
+An important advantage of the client-driven coordination approach is that a load balancer is no longer required to uniformly distribute client load. Fair load distribution is implicitly guaranteed by the near uniform assignment of keys to the storage nodes. Obviously, the efficiency of this scheme is dependent on how fresh the membership information is at the client. Currently clients poll a random Dynamo node every 10 seconds for membership updates. A pull based approach was chosen over a push based one as the former scales better with large number of clients and requires very little state to be maintained at servers regarding clients. However, in the worst case the client can be exposed to stale membership for duration of 10 seconds. In case, if the client detects its membership table is stale (for instance, when some members are unreachable), it will immediately refresh its membership information.
+
 一个客户端驱动的协调方式的重要优势是不再需要一个负载平衡器来均匀分布客户的负载。公平的负载分布隐含地由近乎平均的分配key到存储节点的方式来保证的。显然，这个方案的有效性是信赖于客户端的成员信息的新鲜度的。目前客户每10秒随机地轮循一Dynamo节点来更新成员信息。一个基于抽取(pull)而不是推送(push)的方被采用，因为前一种方法在客户端数量比较大的情况下扩展性好些，并且服务端只需要维护一小部分关于客户端的状态信息。然而，在最坏的情况下，客户端可能持有长达10秒的陈旧的成员信息。如果客户端检测其成员列表是陈旧的(例如，当一些成员是无法访问)情况下，它会立即刷新其成员信息。
 
-表2显示了24小时内观察到的，对比于使用服务端协调方法，使用客户端驱动的协调方法，在99.9百分位延时和平均延时的改善。如表所示，客户端驱动的协调方法，99.9百分位减少至少30毫秒的延时，以及降低了3到4毫秒的平均延时。延时的改善是因为客户端驱动的方法消除了负载平衡器额外的开销以及网络一跳，这在请求被分配到一个随机节点时将导致的开销。如表所示，平均延时往往要明显比99.9百分位延时低。这是因为Dynamo的存储引擎缓存和写缓冲器具有良好的命中率。此外，由于负载平衡器和网络引入额外的对响应时间的可变性，在响应时间方面，99.9th百分位这这种情况下(即使用负载平衡器)获得好处比平均情况下要高。
+Table 2 shows the latency improvements at the 99.9th percentile and averages that were observed for a period of 24 hours using client-driven coordination compared to the server-driven approach. As seen in the table, the client-driven coordination approach reduces the latencies by at least 30 milliseconds for 99.9th percentile latencies and decreases the average by 3 to 4 milliseconds. The latency improvement is because the client- driven approach eliminates the overhead of the load balancer and the extra network hop that may be incurred when a request is assigned to a random node. As seen in the table, average latencies tend to be significantly lower than latencies at the 99.9th percentile. This is because Dynamo’s storage engine caches and write buffer have good hit ratios. Moreover, since the load balancers and network introduce additional variability to the response time, the gain in response time is higher for the 99.9th percentile than the average.
 
-表二：客户驱动和服务器驱动的协调方法的性能。
+
+表2显示了24小时内观察到的，对比于使用服务端协调方法，使用客户端驱动的协调方法，在99.9百分位延时和平均延时的改善。如表所示，客户端驱动的协调方法，99.9百分位减少至少30毫秒的延时，以及降低了3到4毫秒的平均延时。延时的改善是因为客户端驱动的方法消除了负载平衡器额外的开销以及网络一跳，这在请求被分配到一个随机节点时将导致的开销。如表所示，平均延时往往要明显比99.9百分位延时低。这是因为Dynamo的存储引擎缓存和写缓冲器具有良好的命中率。此外，由于负载平衡器和网络引入额外的对响应时间的可变性，在响应时间方面，99.9th百分位这这种情况下(即使用负载平衡器)获得好处比平均情况下要高。
 
 
 |99.9th百分读延时(毫秒)|99.9th百分写入延时(毫秒)|平均读取延时时间(毫秒)|平均写入延时(毫秒)|
 |---|---|---|---|---|
 |服务器驱动|68.9|68.5|3.9|4.02|
 |客户驱动|30.4|30.4|1.55|1.9|
+表二：客户驱动和服务器驱动的协调方法的性能。
 
-6.5权衡后台和前台任务
+###6.5权衡后台和前台任务
+Balancing background vs. foreground tasks
+
+Each node performs different kinds of background tasks for replica synchronization and data handoff (either due to hinting or adding/removing nodes) in addition to its normal foreground put/get operations. In early production settings, these background tasks triggered the problem of resource contention and affected the performance of the regular put and get operations. Hence, it became necessary to ensure that background tasks ran only when the regular critical operations are not affected significantly. To this end, the background tasks were integrated with an admission control mechanism. Each of the background tasks uses this controller to reserve runtime slices of the resource (e.g. database),shared across all background tasks. A feedback mechanism based on the monitored performance of the foreground tasks is employed to change the number of slices that are available to the background tasks.
+
 每个节点除了正常的前台put/get操作，还将执行不同的后台任务，如数据的副本的同步和数据移交(handoff)(由于暗示(hinting)或添加/删除节点导致)。在早期的生产设置中，这些后台任务触发了资源争用问题，影响了正常的put和get操作的性能。因此，有必要确保后台任务只有在不会显著影响正常的关键操作时运行。为了达到这个目的，所有后台任务都整合了管理控制机制。每个后台任务都使用此控制器，以预留所有后台任务共享的时间片资源(如数据库)。采用一个基于对前台任务进行监控的反馈机制来控制用于后台任务的时间片数。
+
+The admission controller constantly monitors the behavior of resource accesses while executing a "foreground" put/get operation. Monitored aspects include latencies for disk operations, failed database accesses due to lock-contention and transaction timeouts, and request queue wait times. This information is used to check whether the percentiles of latencies (or failures) in a given trailing time window are close to a desired threshold. For example, the background controller checks to see how close the 99th percentile database read latency (over the last 60 seconds) is to a preset threshold (say 50ms). The controller uses such comparisons to assess the resource availability for the foreground operations. Subsequently, it decides on how many time slices will be available to background tasks, thereby using the feedback loop to limit the intrusiveness of the background activities. Note that a similar problem of managing background tasks has been studied in [4].
+
 
 管理控制器在进行前台put/get操作时不断监测资源访问的行为，监测数据包括对磁盘操作延时，由于锁争用导致的失败的数据库访问和交易超时，以及请求队列等待时间。此信息是用于检查在特定的后沿时间窗口延时(或失败)的百分位是否接近所期望的阀值。例如，背景控制器检查，看看数据库的99百分位的读延时(在最后60秒内)与预设的阈值(比如50毫秒)的接近程度。该控制器采用这种比较来评估前台业务的资源可用性。随后，它决定多少时间片可以提供给后台任务，从而利用反馈环来限制背景活动的侵扰。请注意，一个与后台任务管理类似的问题已经在[4]有所研究。
 
  
 
-6.6讨论
+###6.6讨论
+
+This section summarizes some of the experiences gained during the process of implementation and maintenance of Dynamo. Many Amazon internal services have used Dynamo for the past two years and it has provided significant levels of availability to its applications. In particular, applications have received successful responses (without timing out) for 99.9995% of its requests and no data loss event has occurred to date.
+
 本节总结了在实现和维护Dynamo过程中获得的一些经验。很多Amazon的内部服务在过去二年中已经使用了Dynamo，它给应用提供了很高级别的可用性。特别是，应用程序的99.9995％的请求都收到成功的响应(无超时)，到目前为止，无数据丢失事件发生。
+
+Moreover, the primary advantage of Dynamo is that it provides the necessary knobs using the three parameters of (N,R,W) to tune their instance based on their needs.. Unlike popular commercial data stores, Dynamo exposes data consistency and reconciliation logic issues to the developers. At the outset, one may expect the application logic to become more complex. However, historically, Amazon’s platform is built for high availability and many applications are designed to handle different failure modes and inconsistencies that may arise. Hence, porting such applications to use Dynamo was a relatively simple task. For new applications that want to use Dynamo, some analysis is required during the initial stages of the development to pick the right conflict resolution mechanisms that meet the business case appropriately. Finally, Dynamo adopts a full membership model where each node is aware of the data hosted by its peers. To do this, each node actively gossips the full routing table with other nodes in the system. This model works well for a system that contains couple of hundreds of nodes. However, scaling such a design to run with tens of thousands of nodes is not trivial because the overhead in maintaining the routing table increases with the system size. This limitation might be overcome by introducing hierarchical extensions to Dynamo. Also, note that this problem is actively addressed by O(1) DHT systems(e.g., [14]).
+
 
 此外，Dynamo的主要优点是，它提供了使用三个参数的(N，R，W)，根据自己的需要来调整它们的实例。不同于流行的商业数据存储，Dynamo将数据一致性与协调的逻辑问题暴露给开发者。开始，人们可能会认为应用程序逻辑会变得更加复杂。然而，从历史上看，Amazon平台都为高可用性而构建，且许多应用内置了处理不同的失效模式和可能出现的不一致性。因此，移植这些应用程序到使用Dynamo是一个相对简单的任务。对于那些希望使用Dynamo的应用，需要开发的初始阶段做一些分析，以选择正确的冲突的协调机制以适当地满足业务情况。最后，Dynamo采用全成员(full membership)模式，其中每个节点都知道其对等节点承载的数据。要做到这一点，每个节点都需要积极地与系统中的其他节点Gossip完整的路由表。这种模式在一个包含数百个节点的系统中运作良好，然而，扩展这样的设计以运行成千上万节点并不容易，因为维持路由表的开销将随着系统的大小的增加而增加。克服这种限制可能需要通过对 Dynamo引入分层扩展。此外，请注意这个问题正在积极由O(1)DHT的系统解决(例如，[14])。
 
  
 
-7结论
+##7结论
+This paper described Dynamo, a highly available and scalable data store, used for storing state of a number of core services of Amazon.com’s e-commerce platform. Dynamo has provided the desired levels of availability and performance and has been successful in handling server failures, data center failures and network partitions. Dynamo is incrementally scalable and allows service owners to scale up and down based on their current
+request load. Dynamo allows service owners to customize their storage system to meet their desired performance, durability and consistency SLAs by allowing them to tune the parameters N, R, and W.
+The production use of Dynamo for the past year demonstrates that decentralized techniques can be combined to provide a single highly-available system. Its success in one of the most challenging application environments shows that an eventual- consistent storage system can be a building block for highly- available applications.
+ACKNOWLEDGEMENTS
+The authors would like to thank Pat Helland for his contribution to the initial design of Dynamo. We would also like to thank Marvin Theimer and Robert van Renesse for their comments. Finally, we would like to thank our shepherd, Jeff Mogul, for his detailed comments and inputs while preparing the camera ready version that vastly improved the quality of the paper.
+
 本文介绍了Dynamo，一个高度可用和可扩展的数据存储系统，被Amazon.com电子商务平台用来存储许多核心服务的状态。Dynamo已经提供了所需的可用性和性能水平，并已成功处理服务器故障，数据中心故障和网络分裂。Dynamo是增量扩展，并允许服务的拥有者根据请求负载按比例增加或减少。Dynamo让服务的所有者通过调整参数N,R和W来达到他们渴求的性能，耐用性和一致性的SLA。
 
 在过去的一年生产系统使用Dynamo表明，分散技术可以结合起来提供一个单一的高可用性系统。其成功应用在最具挑战性的应用环境之一中表明，最终一致性的存储系统可以是一个高度可用的应用程序的构建块。
@@ -657,6 +744,5 @@ X轴刻度间隔相当于一个30分钟的时间。
 
 鸣谢
 作者在此要感谢PatHelland，他贡献了Dynamo的初步设计。我们还要感谢MarvinTheimer和RobertvanRenesse的评注。最后，我们要感谢我们的指路人(shepherd)，JeffMogul,他的详细的评注和input(不知道怎样说了？词穷)在准备camera ready版本时，大大提高了本文的质量。
-
 
 
