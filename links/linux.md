@@ -1,6 +1,7 @@
 #Futex
 
 ==Futex Cheat Sheet==
+----------------------
 
 http://locklessinc.com/articles/futex_cheat_sheet/
 
@@ -8,7 +9,8 @@ http://locklessinc.com/articles/futex_cheat_sheet/
 
 http://locklessinc.com/articles/mutex_cv_futex/
 
-#OS
+==OS==
+-------------------------
 ==为什么主引导记录的内存地址是0x7C00？==
 http://www.ruanyifeng.com/blog/2015/09/0x7c00.html
 
@@ -26,4 +28,9 @@ http://blog.csdn.net/caiyaodeng/article/details/52297691
 http://blog.csdn.net/CAIYAODENG/article/details/52312892
 
 #ZeroCopy
+--------------
 https://www.ibm.com/developerworks/linux/library/j-zerocopy/
+
+shell——wait与多进程并发
+-----------------------
+https://www.cnblogs.com/maxgongzuo/p/6414376.html
