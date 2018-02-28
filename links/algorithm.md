@@ -21,3 +21,6 @@ http://www.cnblogs.com/foxmailed/archive/2012/01/11/2318650.html
 
 #每日Paper
 https://blog.acolyer.org
+
+#Java：手把手带你源码分析 HashMap 1.7
+http://blog.csdn.net/carson_ho/article/details/79373026
