@@ -95,7 +95,7 @@ OpenTSDB分配UID时遵循如下规则：
 
 关于metrics名为”cpu.hum”，tagKey值为”host”，tagValue值分别为”189.120.205.26″、”189.120.205.27″的UID信息定义如下： 
 
-![UID_DEFINITION](C:\Work\Source\docs\md-doc\md-opentsdb-doc\UID_DEFINITION.png)
+![UID_DEFINITION](UID_DEFINITION.png)
 
 说明： 
 
@@ -133,7 +133,7 @@ OpenTSDB分配UID时遵循如下规则：
 
 在上一章节的例子中，就涉及两个TSUID，分别是： 
 
-![TSUID-1](C:\Work\Source\docs\md-doc\md-opentsdb-doc\TSUID-1.png)
+![TSUID-1](TSUID-1.png)
 
 
 
@@ -151,7 +151,7 @@ metrics数据的HBase RowKey中包含主要组成部分为：盐值（Salt）、
 
 HBase RowKey的数据模型如下图所示：
 
- ![RowKey](C:\Work\Source\docs\md-doc\md-opentsdb-doc/RowKey-1530341737176.png)
+ ![RowKey](RowKey-1530341737176.png)
 
 - SALT：建议开启SALT功能，可以有效提高性能。SALT数据的长度是变长的：如果SALT的值值少于256，那么只用一个字节表示即可；如果需要设置更大的SALT值，也会相应地占用更多的空间。
 - Metric ID：metrics名经过编码后，每个Metric ID的长度为三个字节。
@@ -269,7 +269,7 @@ public Deferred<Object> addPoint(final String metric,
 
 判断请求中的时间戳为秒或毫秒的方法是基于时间戳数值的大小，如果时间戳的值的超过无符号整数的最大值（即4个字节的长度），那么该时间戳是毫秒，否则为秒。
 
-![Qualifier-Second](C:\Work\Source\docs\md-doc\md-opentsdb-doc/Qualifier-Second.png)
+![Qualifier-Second](Qualifier-Second.png)
 
 - Value长度：Value的实际长度是Qualifier的最后3个bit的值加1，即(qualifier & 0x07) + 1。表示该时间戳对应的值的字节数。所以，值的字节数的范围是1到8个字节。
 - Value类型：Value的类型由Qualifier的倒数第4个bit表示，即(qualifier & 0x08)。如果值为1，表示Value的类型为float；如果值为0，表示Value的类型为long。
@@ -279,7 +279,7 @@ public Deferred<Object> addPoint(final String metric,
 
 当OpenTSDB接收到一个新的DataPoint的时候，如果请求中的时间戳是毫秒，那么就会插入一个如下模型的数据。
 
-![Qualifier-milisecond](C:\Work\Source\docs\md-doc\md-opentsdb-doc/Qualifier-milisecond.png)
+![Qualifier-milisecond](Qualifier-milisecond.png)
 
 - Value长度：与秒类型相同。
 - Value类型：与秒类型相同。
@@ -293,7 +293,7 @@ public Deferred<Object> addPoint(final String metric,
 
 合并的方法很简单，就是按照时间戳顺序进行排序后，从小到大依次拼接秒类型和毫秒类型的Qualifier即可。
 
-![Qualifier-mix](C:\Work\Source\docs\md-doc\md-opentsdb-doc/Qualifier-mix.png)
+![Qualifier-mix](Qualifier-mix.png)
 
 - 秒类型和毫秒类型的数量没有限制，并且可以任意组合。
 - 不存在相同时间戳的数据，包括秒和毫秒的表示方式。
@@ -335,7 +335,7 @@ HBase Value按照长度可以分为如下几种类型：
 
 按照时间戳的顺序，把多个Value拼接起来的数据模型如下：
 
-![Value-multibytes](C:\Work\Source\docs\md-doc\md-opentsdb-doc/Value-multibytes.png)
+![Value-multibytes](Value-multibytes.png)
 
 
 
@@ -356,7 +356,7 @@ Annotation用于描述某一个时间点发生的事件，Annotation的数据为
 
 RowKey的数据模型如下图：
 
-![Annotation-RowKey](C:\Work\Source\docs\md-doc\md-opentsdb-doc/Annotation-RowKey.png)
+![Annotation-RowKey](Annotation-RowKey.png)
 
 -  Salt/Timestamp/Metric UID/ tagKey UID /tagValue UID的意义与metrics RowKey中的意义相同。
 
