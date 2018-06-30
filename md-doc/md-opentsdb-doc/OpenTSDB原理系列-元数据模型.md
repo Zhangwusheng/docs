@@ -425,9 +425,71 @@ OpenTSDB共涉及到两个HBase表，第一篇文章中讲到了元数据表的�
 
 http://www.nosqlnotes.com/technotes/tsdb/opentsdb-query/
 
+一个完整的OpenTSDB HTTP Query请求，分别由OpenTSDB I/O Thread和AsyncHBase I/O Thread完成。OpenTSDB I/O Thread线程负责处理HTTP Query请求，AsyncHBase I/O Thread负责处理HBase的响应并发送HTTP响应。 
+
+## 请求处理流程
+
+![ReadProcess](ReadProcess.png)
 
 
 
+**1.OpenTSDB I/O Thread收到HTTP Query请求后，会根据OpenTSDB是否使用了SALT进行不同的处理。** 
+
+相关配置项： 
+
+**参数1：**tsd.storage.salt.width 
+
+> **默认值**：0
+>
+> **说明**：SALT的字节长度。当设置为0时，表示不使用SAL。
+
+**参数2：**tsd.storage.salt.buckets
+
+> **默认值**：20
+>
+> **说明**： SALT的数量。当“tsd.storage.salt.width”为非0时，才发挥作用。该配置项的值，不能超过SALT的字节长度所能表示的最大数字。例如SALT的字节长度为1时，该配置项的不能配置成大于256。这两个配置在OpenTSDB初始化就必须确定，运行过程中不能随意修改，否则会导致历史数据读取错误。
+
+
+
+是否使用了SALT，只会对生成的HBase Scanner数量产生影响，每个HBase Scanner的处理流程都是相同的。 
+
+当使用了SALT，就会生成相应SALT数量的HBase Scanner。 
+
+需要注意的是，Scanner的StatKey和StopKey中，只包含了{SALT+Metric ID+Timestamp}。如果需要查询的Metric中包含大量不同的TagName或者TagValue的话，这个Scanner可能需要扫描大量的数据，影响OpenTSDB查询的性能。 
+
+**2.为每个Scanner设置Filter，设置Filter可以更精确的过滤HBase的行，减少无效数据行的传输和处理，以提高查询的性能。** 
+
+如果HTTP Query中设置了Tag的查询条件，Scanner中就会设置KeyRegexpFilter；如果同时设置了explicitTags 为true，Scanner中还会再设置FuzzyRowFilter。 
+
+**参数3：**tsd.query.enable_fuzzy_filter
+
+> **默认值**：true
+>
+> **说明**：当查询请求中包含explicitTags字段的时候，是否在HBase的Scan请求中使用FuzzyRowFilter
+
+**注意：** 
+
+虽然设置了Filter，但是在HBase服务端需要扫描的数据量并不会减少，只是减少了返回的数据量。 
+
+Scan caching默认值为128，可以通过如下配置项进行配置： 
+
+
+
+**参数4：**tsd.storage.hbase.scanner.maxNumRows**
+
+> **默认值**：128
+>
+> **说明**：每次scan时从HBase一次返回的数据行数。
+
+**最后调用Scanner的scan方法，scan方法采用了异步调用。** 
+
+到这里，一个HTTP Query的请求调用已经被处理完了。 
+
+
+
+## 响应处理流程
+
+![ReadResponse](ReadResponse.png)
 
 # OpenTSDB原理系列：线程模型
 
