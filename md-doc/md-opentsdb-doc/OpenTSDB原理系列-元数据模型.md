@@ -491,7 +491,80 @@ Scan caching默认值为128，可以通过如下配置项进行配置：
 
 ![ReadResponse](ReadResponse.png)
 
+**1**. 一个HTTP Query所生成的多个Scanner，可能发送到了多个RegionServer上，所以OpenTSDB可能收到多个RegionServer发送过来的scanner结果。 
+
+**2**. 每个RegionServer的scanner结果，都由其绑定的一个线程进行处理。这个线程既负责从socket中接收Scanner结果，也要负责处理这些scanner结果。因此，它只能逐个处理这些Scanner结果。 
+
+**3**. 当处理完一个scanner结果后，如果这个scanner的所有结果还没有传输完，就继续异步调用scan方法，以获得后续的scanner结果。调用完后，就继续处理下一个scanner结果。 
+
+**4**. 当一个scanner的所有结果都已经处理完了，而且这个scanner不是所关联HTTP Query请求的最后一个被处理的Scanner，那么就把处理后的数据暂时缓存起来。然后继续处理下一个scanner结果；如果是最后一个scanner，就把这个HTTP Query请求的所有scanner结果进行合并，生成一个HTTP Query的Response，并发送回到OpenTSDB应用。 
+
+
+
+**至此，在OpenTSDB的应用端，就已经完成了一次完整的HTTP Query查询。** 
+
+
+
+
+
 # OpenTSDB原理系列：线程模型
 
 http://www.nosqlnotes.com/technotes/opentsdb-threadmodel/
 
+前面两篇文章介绍了 OpenTSDB的元数据模型以及数据表定义，这篇文章介绍OpenTSDB的线程模型，主要是处理HTTP请求的线程池以及负责HBase响应的线程池。 
+
+
+
+## HTTP请求处理线程池
+
+OpenTSDB启动时，会创建一个Netty服务端（默认端口为4242），以接收OpenTSDB服务端发送过来的HTTP请求。Netty的服务端实现包括了一个Boss线程和多个业务处理线程（默认线程数为CPU核数的两倍）。 
+
+
+
+![HTTP-Request-1](HTTP-Request-1.png)
+
+1. OpenTSDB应用通过Socket连接到OpenTSDB的服务端，OpenTSDB的Boss线程会处理这个连接请求； 
+
+2. OpenTSDB Boss Thread通过监听端口，接受该连接请求，并生成一个新的socket连接。 
+
+3. OpenTSDB Boss Thread把新的socket注册到业务处理线程池中。每个socket绑定I/O线程池中的某个线程。 
+
+4. OpenTSDB I/O Thread通过轮询各个Socket，从Socket中取出HTTP请求的内容。 
+
+   **说明**：上述1~4步骤，都是在Netty的框架中完成。 
+
+5. OpenTSDB I/O Thread处理HTTP请求数据（不同的请求有不同的处理流程，另文进行说明）。 
+
+6. 如果OpenTSDB与HBase之间的连接不存在，就创建一个新连接。 
+
+7. OpenTSDB I/O Thread处理HTTP请求数据后，发送HBase请求到HBase服务。 
+
+8. 由上面的流程可以知道，OpenTSDB的请求都是由OpenTSDB I/O Thread线程池进行处理的。 
+
+
+
+## HBase响应处理线程池
+
+OpenTSDB发送请求到HBase后，需要处理HBase返回的相应消息，这是通过OpenTSDB中的一个Netty客户端实现的。 
+
+Netty的客户端实现包括了一个Boss线程和多个业务处理线程（默认线程数为CPU核数*2）。 
+
+![HTTP-Response](HTTP-Response.png)
+
+1. 每个HBase与OpenTSDB之间的Socket连接，在OpenTSDB向HBase发起请求的时候就已经建立了。 也会把该Socket绑定到AsyncHBase I/O Threads线程池的一个线程中。 
+
+2. AsyncHBase I/O Thread读取Socket中的HBase响应消息。 
+
+   **说明**：上述1~2步骤是在Netty的框架中完成的。 
+
+3. AsyncHBase I/O Thread 处理HBase的响应消息。而后，发送HTTP响应消息到OpenTSDB应用端。 
+
+   
+
+   由上面的流程可以知道，OpenTSDB的HTTP响应都是由AsyncHBase I/O Thread线程池处理的。 
+
+## 小结
+
+
+
+在OpenTSDB中，对HTTP请求和HBase响应是**异步处理**的，这部分主要是借助了Netty的框架。异步处理使得线程资源的利用更加高效，一定程度上能够提升读写的并发度，带来吞吐量的提升。目前，HBase也已经支持了异步RPC框架。 
