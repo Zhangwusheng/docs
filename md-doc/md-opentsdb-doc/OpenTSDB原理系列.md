@@ -702,3 +702,715 @@ sys.cpu.user host=webserver01,cpu=0,datacenter=lax,department=ops
 **参考信息：**
 
 OpenTSDB Document
+
+
+
+
+
+# 6.解密OpenTSDB的表存储优化
+
+https://yq.aliyun.com/articles/54785
+
+
+
+## 摘要 
+
+OpenTSDB是一个分布式的、可伸缩的时间序列数据库，在DB-engines的时间序列数据库[排行榜](http://db-engines.com/en/ranking/time+series+dbms)上排名第五。它的特点是能够提供最高毫秒级精度的时间序列数据存储，能够长久保存原始数据并且不失精度。它拥有很强的数据写入能力，支持大并发的数据写入，并且拥有可无限水平扩展的存储容量。
+
+​        它的强大的数据写入能力与存储能力得益于它底层依赖的HBase数据库，也得益于它在表结构设计上做的大量的存储优化。
+
+​        本篇文章会详细讲解其表结构设计，在理解它的表结构设计的同时，分析其采取该设计的深层次原因以及优缺点。它的表结构设计完全贴合HBase的存储模型，而表格存储（TableStore、原OTS）与HBase有类似的存储模型，理解透OpenTSDB的表结构设计后，我们也能够对这类数据库的存储模型有一个更深的理解。
+
+## 存储模型
+
+在解析OpenTSDB的表结构设计前，我们需要先对其底层的HBase的存储模型有一个理解。
+
+## 表分区
+
+HBase会按Rowkey的范围，将一张大表切成多个region，每个region会由一个region server加载并提供服务。Rowkey的切分与表格存储的分区类似，一个良好设计的表，需要保证读写压力能够均匀的分散到表的各个region，这样才能充分发挥分布式集群的能力。
+
+
+
+![05224f4c4a40c93dcddc983a7a717ff7a047de50](05224f4c4a40c93dcddc983a7a717ff7a047de50.png)
+
+
+
+如图所示为表结构以及对应的存储结构示例，在HBase或表格存储这类底层采用LSM-tree的数据库中，表数据会按列存储。每行中的每一列在存储文件中都会以Key-value的形式存在于文件中。其中Key的结构为：行主键 + 列名，Value为列的值。该种存储结构的特点是：
+
+​        a. 每行主键会重复存储，取决于列的个数
+
+​        b. 列名会重复存储，每一列的存储都会携带列名
+
+​        c. 存储数据按row-key排序，相邻的row-key会存储在相邻的块中
+
+## OpenTSDB的基本概念
+
+OpenTSDB定义每个时间序列数据需要包含以下属性：
+
+1.  指标名称（metric name）
+2.  时间戳（UNIX timestamp，毫秒或者秒精度）
+3.  值（64位整数或者单精度浮点数）
+4.  一组标签（tags，用于描述数据属性，至少包含一个或多个标签，每个标签由tagKey和tagValue组成，tagKey和tagValue均为字符串）
+
+举个例子，在监控场景中，我们可以这样定义一个监控指标：
+
+> 指标名称： sys.cpu.user 标签： host = 10.101.168.111 cpu = 0 指标值： 0.5 
+
+指标名称代表这个监控指标是对用户态CPU的使用监控，引入了两个标签，分别标识该监控位于哪台机器的哪个核。
+
+
+
+OpenTSDB支持的查询场景为：指定指标名称和时间范围，给定一个或多个标签名称和标签的值作为条件，查询出所有的数据。
+
+以上面那个例子举例，我们可以查询：
+
+​    a. sys.cpu.user (host=\*,cpu=\*)(1465920000 <= timestamp < 1465923600)：查询凌晨0点到1点之间，所有机器的所有CPU核上的用户态CPU消耗。
+
+​    b. sys.cpu.user (host=10.101.168.111,cpu=\*)(1465920000 <= timestamp < 1465923600)：查询凌晨0点到1点之间，某台机器的所有CPU核上的用户态CPU消耗。
+
+​    c. sys.cpu.user (host=10.101.168.111,cpu=0)(1465920000 <= timestamp < 1465923600)：查询凌晨0点到1点之间，某台机器的第0个CPU核上的用户态CPU消耗。
+
+
+
+## OpenTSDB的存储优化
+
+了解了OpenTSDB的基本概念后，我们来尝试设计一下表结构。
+
+
+
+![f77d814e298bca40cdefcea04892fe702ba232c7](f77d814e298bca40cdefcea04892fe702ba232c7.png)
+
+
+
+如上图是一个简单的表结构设计，rowkey采用metric name + timestamp + tags的组合，因为这几个元素才能唯一确定一个指标值。
+
+这张表已经能满足我们的写入和查询的业务需求，但是OpenTSDB采用的表结构设计远没有这么简单，我们接下来一项一项看它对表结构做的一些优化。
+
+### **优化一：缩短row key**
+
+观察这张表内存储的数据，在rowkey的组成部分内，其实有很大一部分的重复数据，重复的指标名称，重复的标签。以上图为例，如果每秒采集一次监控指标，cpu为2核，host规模为100台，则一天时间内sys.cpu.user这个监控指标就会产生17280000行数据，而这些行中，监控指标名称均是重复的。如果能将这部分重复数据的长度尽可能的缩短，则能带来非常大的存储空间的节省。
+
+OpenTSDB采用的策略是，为每个metric、tag key和tag value都分配一个UID，UID为固定长度三个字节。
+
+ ![e1e766e7defcf059535c9c184a0659b499221c38](e1e766e7defcf059535c9c184a0659b499221c38.png)
+
+上图为优化后的存储结构，可以看出，rowkey的长度大大的缩短了。rowkey的缩短，带来了很多好处：
+
+​    a. 节省存储空间
+
+​    b. 提高查询效率：减少key匹配查找的时间
+
+​    c. 提高传输效率：不光节省了从文件系统读取的带宽，也节省了数据返回占用的带宽，提高了数据写入和读取的速度。
+
+​    d. 缓解Java程序内存压力：Java程序，GC是老大难的问题，能节省内存的地方尽量节省。原先用String存储的metric name、tag key或tag value，现在均可以用3个字节的byte array替换，大大节省了内存占用。
+
+### 优化二：减少Key-Value数
+
+优化一是OpenTSDB做的最核心的一个优化，很直观的可以看到存储的数据量被大大的节省了。原理也很简单，将长的变短。但是是否还可以进一步优化呢？
+
+在上面的存储模型章节中，我们了解到。HBase在底层存储结构中，每一列都会以Key-Value的形式存储，每一列都会包含一个rowkey。如果要进一步缩短存储量，那就得想办法减少Key-Value的个数。
+
+OpenTSDB分了几个步骤来减少Key-Value的个数：
+
+\1. 将多行合并为一行，多行单列变为单行多列。
+
+\2. 将多列合并为一列，单行多列变为单行单列。
+
+#### 多行单列合并为单行单列
+
+
+
+![6106c668b7104312859391a26994029372a8f9de](6106c668b7104312859391a26994029372a8f9de.png)
+
+
+
+OpenTSDB将同属于一个时间周期内的具有相同TSUID（相同的metric name，以及相同的tags）的数据合并为一行存储。OpenTSDB内默认的时间周期是一个小时，也就是说同属于这一个小时的所有数据点，会合并到一行内存储，如图上所示。合并为一行后，该行的rowkey中的timestamp会指定为该小时的起始时间（所属时间周期的base时间），而每一列的列名，则记录真实数据点的时间戳与该时间周期起始时间（base）的差值。
+
+这里列名采用差值而不是真实值也是一个有特殊考虑的设计，如存储模型章节所述，列名也是会存在于每个Key-Value中，占用一定的存储空间。如果是秒精度的时间戳，需要4个字节，如果是毫秒精度的时间戳，则需要8个字节。但是如果列名只存差值且时间周期为一个小时的话，则如果是秒精度，则差值取值范围是0-3600，只需要2个字节；如果是毫秒精度，则差值取值范围是0-360000，只需要4个字节；所以相比存真实时间戳，这个设计是能节省不少空间的。
+
+#### 单行多列合并为单行单列
+
+多行合并为单行后，并不能真实的减少Key-Value个数，因为总的列数并没有减少。所以要达到真实的节省存储的目的，还需要将一行的列变少，才能真正的将Key-Value数变少。
+
+OpenTSDB采取的做法是，会在后台定期的将一行的多列合并为一列，称之为『compaction』，合并完之后效果如下。
+
+
+
+![e85374ccb1823e8829afc5407d32ea14ae2a9078](e85374ccb1823e8829afc5407d32ea14ae2a9078.png)
+
+
+
+同一行中的所有列被合并为一列，如果是秒精度的数据，则一行中的3600列会合并为1列，Key-Value数从3600个降低到只有1个。
+
+### 优化三：并发写优化
+
+上面两个优化主要是OpenTSDB对存储的优化，存储量下降以及Key-Value个数下降后，除了直观的存储量上的缩减，对读和写的效率都是有一定提升的。
+
+时间序列数据的写入，有一个不可规避的问题是写热点问题，当某一个metric下数据点很多时，则该metric很容易造成写入热点。OpenTSDB采取了和这篇[文章](https://yq.aliyun.com/articles/54644?spm=a2c4e.11153940.blogcont54785.7.42eb5567Hm9z5g)中介绍的一样的方法，允许将metric预分桶，可通过『tsd.storage.salt.buckets』配置项来配置。
+
+![7fab2b13b9c2e05508de947ca887962f211fc351](7fab2b13b9c2e05508de947ca887962f211fc351.png)
+
+如上图所示，预分桶后的变化就是在rowkey前会拼上一个桶编号（bucket index）。预分桶后，可将某个热点metric的写压力分散到多个桶中，避免了写热点的产生。
+
+## 总结
+
+OpenTSDB作为一个应用广泛的时间序列数据库，在存储上做了大量的优化，优化的选择也是完全契合其底层依赖的HBase数据库的存储模型。表格存储拥有和HBase一样的存储模型，这部分优化经验可以直接借鉴使用到表格存储的应用场景中，值得我们好好学习。有问题欢迎大家一起探讨。
+
+
+
+# 7.Opentsdb的数据存储
+
+http://kabike.iteye.com/blog/2164633   
+
+## Hbase宽列存储     
+
+假设一般关系型数据库存储某指标ABX在2014年5月1日08时左右的如下数据   ![img](C:\Work\Source\docs\md-doc\md-opentsdb-doc\06803ce1-b2b2-3bb1-9cd2-b75ddc24eca1.png)   
+
+可以看出时间数据前缀有重复,在Hbase中可以通过提取共同前缀,达到减小存储空间,提高存储效率的目标.将上述时序数据在Hbase中以宽列形式存储,逻辑结构表示如下  :
+
+
+
+ ![img](8e5ce5b4-3413-3f49-b57e-732cd29f7a5b.png)   
+
+
+
+Hfile中keyvalue的物理存储格式(略去column family和version部分)如下  
+
+![img](2cad1401-087c-3aea-9f3c-db78ba8a761d.png)  
+
+宽列存储的优势在于Hfile中的row(相同rowkey的keyvalue是一个row)数量会大大减少,提高查询效率,原因如下:    1)Hfile中meta block中会存储bloom filter,用来判定特定的rowkey是否在Hfile中.随着row数量的减少,bloom filter的体积会显著减小,因为bloom filter entry的生成是以row为单位.    
+
+2)Hbase中除了rowkey作为检索条件,还可以利用filter在rowkey,keyvalue,keyvalue的集合上进行过滤.在filter执行的早期阶段进行rowkey的比较,如果发现整个row不符合条件,能迅速跳过大量keyvalue,减少filter比对的次数.  
+
+## 宽列存储的compact  
+
+宽列存储的硬盘空间节省非常有限,因为keyvalue的数量受column qualifier数量影响.因此可以在宽列存储的基础上进行二次compact,将同一个row的多个column qualifier存储为一个column qualifier.   ![img](C:\Work\Source\docs\md-doc\md-opentsdb-doc\ef8f91ea-ccd8-3cb2-a630-14c260a029b9.png)  
+
+
+
+其keyvalue物理存储格式(略去column family和version部分)为  
+
+ ![img](f051e948-0f63-37e4-aefd-494433f0f4cd.png)  
+
+进过二次compact的时序数据,在存储体积上也显著减小.配合其他压缩算法,可以极大的节省存储空间,提高访问效率.   Opentsdb在添加数据点的时候,把需要compact的row放到一个队列中,然后定时compact.   TSDB的addPointInternal方法中,调用scheduleForCompaction将row放入队列, CompactionQueue类中,启动Thrd这个线程来进行compact   但是有时候一个row已经被compact过了,这个row仍有可能插入数据,所以要对已经compact的row进行第二次compact,所以在scan的时候,仍然有可能进行compact.  ScannerCB类中,每次scan完成仍然调用compact方法进行数据compaction   下图表示一个已经compact的row,插入了新的数据后,又一次进行了compact   
+
+
+
+![img](d0474e2b-77ef-3194-abdd-12264e752d1b.png)    
+
+
+
+
+
+
+
+## Opentsdb中的tree  
+
+
+
+Opents中的监控指标都是metric,每个metric都互相独立,带有tag,由用户自定义metric和tag,但是可以通过自定义规则,将metric,tag分解为树的形式进行结构化展现. 
+
+   ![img](195b1f0e-92ce-3c79-aaa1-83e4ef0bbd24.png)  
+
+
+
+比如有上面的metric和tag,可以通过规则(提取tag value,正则表达式分解metric等),变换为如下的tree  
+
+先按照数据中心分级,然后按主机,然后按监控类型  
+
+ 
+
+![img](ffca9bdc-1d90-3322-b26c-b7075ae648cc.png) 
+
+
+
+
+
+# 8.OpenTSDB中的Compaction
+
+Compaction作为一个可选项，如果在配置中启用，则OpenTSDB会启动一个守护线程，在后台周期性地执行compact操作。
+
+OpenTSDB的compact操作，其实质为将一个小时的3600秒数据（对应于HBase中3600个KeyValue），合并为一个KeyValue（包括qualifier以及value），来节约存储资源。因为在HBase中，rowkey的大量重复是低效的，因此compact显得很有必要。
+
+具体而言，OpenTSDB中，采用了ConcurentSkipListMap这一数据结构作为CompactionQueue，该队列存储了所有的插入HBase的DataPoint所对应的rowkey，CompactionThread周期性地(`tsd.storage.compation.flush_interval`）从这个队列中进行compact操作。执行compact操作还需要满足队列大小大于`tsd.storage.compaction.min_flush_threshold`，以及只有old enough的row才会被compact.关于Old enough的衡量，在OpenTSDB中被写死为1个小时，注意，这里并非为整点，而是距离当前系统时间的1个小时。
+
+CompactionThread对于每一个old enough的rowkey，会调用TSDB类的get方法来取出整个row的数据（List<KeyValue>)，然后对这一row进行compact操作。Compact的过程在Compaction类中。
+
+> in 2.2, writing to HBase columns via appends is now supported. This can improve both read and write performance in that TSDs will no longer maintain a queue of rows to compact at the end of each hour, thus preventing a massive read and re-write operation in HBase. However due to the way appends operate in HBase, an increase in CPU utilization, store file size and HDFS traffic will occur on the region servers. Make sure to monitor your HBase servers closely.
+
+ 
+
+ 
+
+ Compaction
+
+在 OpenTSDB 中，会将多列合并到一列之中以减少磁盘占用空间，这个过程会在 TSD 写数据或者查询过程中不定期的发生。
+
+![compaction](2016-07-04-research-of-time-series-database-opentsdb-compaction.png)
+
+例如图中，将列 1890 和 列 1892 合并到了一起。
+
+ 
+
+# 9. OpenTSDB Digest：HBase 数据的写入和压缩
+
+本文主要介绍 OpenTSDB 时间数据点写入 HBase 和压缩过程中的几个主要步骤，话不多说，上代码。
+
+## 1.UID 的写入
+
+### 1.1 UID 的获取和创建
+
+UID 与其代表的字符串的对应关系存放于 tsdb-uid 表，该表有两个列族：NAME 和 ID，当 OpenTSDB 接收到一个的 metric/tagk/tagv 的值的时候，会先检查在这个表中有没有对应的 UID 存在，如果有就返回对应的 UID 供后续使用，如果没有就会创建一个新的。
+
+`class: net.opentsdb.uid.UniqueId`
+
+```
+public Deferred<byte[]> getOrCreateIdAsync(final String name) {
+  // Look in the cache first.
+  final byte[] id = getIdFromCache(name);
+  if (id != null) {
+    cache_hits++;
+    return Deferred.fromResult(id);
+  }
+  // Not found in our cache, so look in HBase instead.
+
+  class HandleNoSuchUniqueNameCB implements Callback<Object, Exception> {
+    public Object call(final Exception e) {
+      if (e instanceof NoSuchUniqueName) {
+        
+        Deferred<byte[]> assignment = null;
+        
+        ...
+        
+        // start the assignment dance after stashing the deferred
+        return new UniqueIdAllocator(name, assignment).tryAllocate();
+      }
+      return e;  // Other unexpected exception, let it bubble up.
+    }
+  }
+
+  // Kick off the HBase lookup, and if we don't find it there either, start
+  // the process to allocate a UID.
+  return getIdAsync(name).addErrback(new HandleNoSuchUniqueNameCB());
+}
+```
+
+### 1.2 新的 UID 的创建过程
+
+创建一个新的 UID 的步骤如下：
+
+- 确定 UID 的值（tsdb-uid 表的 row key 递增）
+- 写入 UID 到 NAME 的对应关系，即 row key 为 UID，column family 选择 NAME，column qualifier 选择 UID 的类型（metric / tagk / tagv）
+- 写入 NAME 到 UID 的对应关系，即 row key 为NAME，column family 选择 ID，column qualifier 选择 UID 的类型（metric / tagk/ tagv）
+- 返回新建的 UID
+
+所以对一对 UID 和 NAME， tsdb-uid 表中存放了两条记录（如下图所示），支持按照 NAME 获取 UID 和按照 UID 获取对应类型的 NAME。
+
+[![UID Create Example](http://7xjkvk.com1.z0.glb.clouddn.com/UID%20create%20example.png)](http://7xjkvk.com1.z0.glb.clouddn.com/UID%20create%20example.png)UID Create Example
+
+因为 HBase 只支持行级事务，所以这个过程中先写入 UID 到 NAME 的 mapping，这样即使后边失败了，这行数据也不会有坏的影响；反过来的话可能会导致根据 NAME 拿到的 UID 在表中并不存在。
+
+`class: net.opentsdb.uid.UniqueId`
+
+```
+private final class UniqueIdAllocator implements Callback<Object, Object> {
+  private final String name;  // What we're trying to allocate an ID for.
+  private final Deferred<byte[]> assignment; // deferred to call back
+  private short attempt = MAX_ATTEMPTS_ASSIGN_ID;  // Give up when zero.
+
+  private HBaseException hbe = null;  // Last exception caught.
+
+  private long id = -1;  // The ID we'll grab with an atomic increment.
+  private byte row[];    // The same ID, as a byte array.
+
+  private static final byte ALLOCATE_UID = 0;
+  private static final byte CREATE_REVERSE_MAPPING = 1;
+  private static final byte CREATE_FORWARD_MAPPING = 2;
+  private static final byte DONE = 3;
+  private byte state = ALLOCATE_UID;  // Current state of the process.
+
+  UniqueIdAllocator(final String name, final Deferred<byte[]> assignment) {
+    this.name = name;
+    this.assignment = assignment;
+  }
+
+  Deferred<byte[]> tryAllocate() {
+    attempt--;
+    state = ALLOCATE_UID;
+    call(null);
+    return assignment;
+  }
+
+  @SuppressWarnings("unchecked")
+  public Object call(final Object arg) {
+    
+    ...
+          
+    final Deferred d;
+    switch (state) {
+      case ALLOCATE_UID:
+        d = allocateUid();
+        break;
+      case CREATE_REVERSE_MAPPING:
+        d = createReverseMapping(arg);
+        break;
+      case CREATE_FORWARD_MAPPING:
+        d = createForwardMapping(arg);
+        break;
+      case DONE:
+        return done(arg);
+      default:
+        throw new AssertionError("Should never be here!");
+    }
+    return d.addBoth(this).addErrback(new ErrBack());
+  }
+
+  private Deferred<Long> allocateUid() {
+    LOG.info("Creating an ID for kind='" + kind()
+             + "' name='" + name + '\'');
+
+    state = CREATE_REVERSE_MAPPING;
+    return client.atomicIncrement(new AtomicIncrementRequest(table, MAXID_ROW,
+                                                             ID_FAMILY,
+                                                             kind));
+  }
+
+  private Deferred<Boolean> createReverseMapping(final Object arg) {
+  
+    ...
+
+    state = CREATE_FORWARD_MAPPING;
+    return client.compareAndSet(reverseMapping(), HBaseClient.EMPTY_ARRAY);
+  }
+
+  private PutRequest reverseMapping() {
+    return new PutRequest(table, row, NAME_FAMILY, kind, toBytes(name));
+  }
+
+  private Deferred<?> createForwardMapping(final Object arg) {
+  
+    ...
+
+    state = DONE;
+    return client.compareAndSet(forwardMapping(), HBaseClient.EMPTY_ARRAY);
+  }
+
+  private PutRequest forwardMapping() {
+      return new PutRequest(table, toBytes(name), ID_FAMILY, kind, row);
+  }
+
+  private Deferred<byte[]> done(final Object arg) {
+  
+    ...
+    
+  }
+
+}
+```
+
+## 2. 数据点的写入
+
+### 2.1 生成单个数据点的 Row Key 模板
+
+根据数据点的 metric 和 tags 生成 row key 的 byte 数组，byte 数组的顺序是：metric_id, timestamp, tag key 1, tag value 1, tag key 2, tag value 2, … 。其中 timestamp 部分的值未设置，tag 部分是排过序的。
+
+`class: net.opentsdb.core.IncomingDataPoints`
+
+```
+/**
+ * Returns a partially initialized row key for this metric and these tags.
+ * The only thing left to fill in is the base timestamp.
+ */
+static byte[] rowKeyTemplate(final TSDB tsdb,
+                              final String metric,
+                              final Map<String, String> tags) {
+   final short metric_width = tsdb.metrics.width();
+   final short tag_name_width = tsdb.tag_names.width();
+   final short tag_value_width = tsdb.tag_values.width();
+   final short num_tags = (short) tags.size();
+
+   int row_size = (metric_width + Const.TIMESTAMP_BYTES
+                   + tag_name_width * num_tags
+                   + tag_value_width * num_tags);
+   final byte[] row = new byte[row_size];
+
+   short pos = 0;
+
+   copyInRowKey(row, pos, (tsdb.config.auto_metric() ? 
+       tsdb.metrics.getOrCreateId(metric) : tsdb.metrics.getId(metric)));
+   pos += metric_width;
+
+   pos += Const.TIMESTAMP_BYTES;
+
+   for(final byte[] tag : Tags.resolveOrCreateAll(tsdb, tags)) {
+     copyInRowKey(row, pos, tag);
+     pos += tag.length;
+   }
+   return row;
+ }
+```
+
+### 2.2 生成单个数据点的 Column Qualifier
+
+根据 timestamp 生成 column qualifier 的 byte 数组，timestamp 的单位是秒和毫秒的时候，返回的数组的长度分别是 2 和 4。
+
+column qualifier 由两部分组成：第一部分代表该数据点与上一个整点的时间差，第二部分（最后四位）代表该数据点值的数据类型，byte、short、int、long、float、double类型对应的分别是：0000、0001、0011、0111、1011、1111。如下图所示：
+
+[![OpenTSDB Column Qualifier](opentsdb_cf.png)](http://7xjkvk.com1.z0.glb.clouddn.com/opentsdb_cf.png)OpenTSDB Column Qualifier
+
+`class: net.opentsdb.core.Internal`
+
+```
+/**
+  * Returns a 2 or 4 byte qualifier based on the timestamp and the flags. If
+  * the timestamp is in seconds, this returns a 2 byte qualifier. If it's in
+  * milliseconds, returns a 4 byte qualifier 
+  * @param timestamp A Unix epoch timestamp in seconds or milliseconds
+  * @param flags Flags to set on the qualifier (length &| float)
+  * @return A 2 or 4 byte qualifier for storage in column or compacted column
+  * @since 2.0
+  */
+ public static byte[] buildQualifier(final long timestamp, final short flags) {
+   final long base_time;
+   if ((timestamp & Const.SECOND_MASK) != 0) {
+     // drop the ms timestamp to seconds to calculate the base timestamp
+     base_time = ((timestamp / 1000) - ((timestamp / 1000) 
+         % Const.MAX_TIMESPAN));
+     final int qual = (int) (((timestamp - (base_time * 1000) 
+         << (Const.MS_FLAG_BITS)) | flags) | Const.MS_FLAG);
+     return Bytes.fromInt(qual);
+   } else {
+     base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
+     final short qual = (short) ((timestamp - base_time) << Const.FLAG_BITS
+         | flags);
+     return Bytes.fromShort(qual);
+   }
+ }
+```
+
+### 2.3 写入单个数据点
+
+写入一个数据点，会生成该数据点的 row key、column qualifier，然后发送写入 HBase 的请求，并将此数据点加入到 OpenTSDB 自身的 compaction 队列中，OpenTSDB 的 compaction 与 HBase 的 compaction 是两回事。
+
+可以看出，对于同一个 metric，如果 tags 这部分相同，那么同一个小时的数据点的 row key 也是相同的。
+
+`class: net.opentsdb.core.TSDB`
+
+```
+private Deferred<Object> addPointInternal(final String metric,
+                                           final long timestamp,
+                                           final byte[] value,
+                                           final Map<String, String> tags,
+                                           final short flags) {
+   // we only accept positive unix epoch timestamps in seconds or milliseconds
+   if (timestamp < 0 || ((timestamp & Const.SECOND_MASK) != 0 && 
+       timestamp > 9999999999999L)) {
+     throw new IllegalArgumentException((timestamp < 0 ? "negative " : "bad")
+         + " timestamp=" + timestamp
+         + " when trying to add value=" + Arrays.toString(value) + '/' + flags
+         + " to metric=" + metric + ", tags=" + tags);
+   }
+   IncomingDataPoints.checkMetricAndTags(metric, tags);
+   final byte[] row = IncomingDataPoints.rowKeyTemplate(this, metric, tags);
+   final long base_time;
+   final byte[] qualifier = Internal.buildQualifier(timestamp, flags);
+   
+   if ((timestamp & Const.SECOND_MASK) != 0) {
+     // drop the ms timestamp to seconds to calculate the base timestamp
+     base_time = ((timestamp / 1000) - 
+         ((timestamp / 1000) % Const.MAX_TIMESPAN));
+   } else {
+     base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
+   }
+   
+   Bytes.setInt(row, (int) base_time, metrics.width());
+   scheduleForCompaction(row, (int) base_time);
+   final PutRequest point = new PutRequest(table, row, FAMILY, qualifier, value);
+   
+   // TODO(tsuna): Add a callback to time the latency of HBase and store the
+   // timing in a moving Histogram (once we have a class for this).
+   Deferred<Object> result = client.put(point);
+   if (!config.enable_realtime_ts() && !config.enable_tsuid_incrementing() && 
+       !config.enable_tsuid_tracking() && rt_publisher == null) {
+     return result;
+   }
+   
+   final byte[] tsuid = UniqueId.getTSUIDFromKey(row, METRICS_WIDTH, 
+       Const.TIMESTAMP_BYTES);
+   
+   // for busy TSDs we may only enable TSUID tracking, storing a 1 in the
+   // counter field for a TSUID with the proper timestamp. If the user would
+   // rather have TSUID incrementing enabled, that will trump the PUT
+   if (config.enable_tsuid_tracking() && !config.enable_tsuid_incrementing()) {
+     final PutRequest tracking = new PutRequest(meta_table, tsuid, 
+         TSMeta.FAMILY(), TSMeta.COUNTER_QUALIFIER(), Bytes.fromLong(1));
+     client.put(tracking);
+   } else if (config.enable_tsuid_incrementing() || config.enable_realtime_ts()) {
+     TSMeta.incrementAndGetCounter(TSDB.this, tsuid);
+   }
+   
+   if (rt_publisher != null) {
+     rt_publisher.sinkDataPoint(metric, timestamp, value, tags, tsuid, flags);
+   }
+   return result;
+ }
+```
+
+## 3. 数据点的压缩
+
+### 3.1 将所有数据点加载到内存
+
+将队列中的所有数据点转成 ColumnDatapointIterator 类型，然后存放在一个 ArrayList 中，方便后续的操作。
+
+从 ColumnDatapointIterator 类的定义看，这里的数据点可以是单个数据点，也可以是之前压缩过的数据点。
+
+`class: net.opentsdb.core`
+
+```
+/**
+    * Build a heap of columns containing datapoints.  Assumes that non-datapoint columns are
+    * never merged.  Adds datapoint columns to the list of rows to be deleted.
+    *
+    * @return an estimate of the number of total values present, which may be high
+    */
+   private int buildHeapProcessAnnotations() {
+     int tot_values = 0;
+     for (final KeyValue kv : row) {
+       final byte[] qual = kv.qualifier();
+       final int len = qual.length;
+       if ((len & 1) != 0) {
+         // process annotations and other extended formats
+         if (qual[0] == Annotation.PREFIX()) {
+           annotations.add(JSON.parseToObject(kv.value(), Annotation.class));
+         } else {
+           LOG.warn("Ignoring unexpected extended format type " + qual[0]);
+         }
+         continue;
+       }
+       // estimate number of points based on the size of the first entry
+       // in the column; if ms/sec datapoints are mixed, this will be
+       // incorrect, which will cost a reallocation/copy
+       final int entry_size = Internal.inMilliseconds(qual) ? 4 : 2;
+       tot_values += (len + entry_size - 1) / entry_size;
+       if (longest == null || longest.qualifier().length < kv.qualifier().length) {
+         longest = kv;
+       }
+       ColumnDatapointIterator col = new ColumnDatapointIterator(kv);
+       if (col.hasMoreData()) {
+         heap.add(col);
+       }
+       to_delete.add(kv);
+     }
+     return tot_values;
+   }
+```
+
+### 3.2 将所有的数据点合并到一个列表中
+
+对所有需要压缩的数据点，创建两个 ByteBufferList，分别存放这些数据点的 column qualifier 和对应的 column value。
+
+如果是之前压缩过的数据点，在这一步会被重新打散成单个数据点。
+
+`class: net.opentsdb.core`
+
+```
+/**
+ * Process datapoints from the heap in order, merging into a sorted list.  Handles duplicates
+ * by keeping the most recent (based on HBase column timestamps; if duplicates in the )
+ *
+ * @param compacted_qual qualifiers for sorted datapoints
+ * @param compacted_val values for sorted datapoints
+ */
+private void mergeDatapoints(ByteBufferList compacted_qual, ByteBufferList compacted_val) {
+  int prevTs = -1;
+  while (!heap.isEmpty()) {
+    final ColumnDatapointIterator col = heap.remove();
+    final int ts = col.getTimestampOffsetMs();
+    if (ts == prevTs) {
+      // check to see if it is a complete duplicate, or if the value changed
+      final byte[] existingVal = compacted_val.getLastSegment();
+      final byte[] discardedVal = col.getCopyOfCurrentValue();
+      if (!Arrays.equals(existingVal, discardedVal)) {
+        duplicates_different.incrementAndGet();
+        if (!tsdb.config.fix_duplicates()) {
+          throw new IllegalDataException("Duplicate timestamp for key="
+              + Arrays.toString(row.get(0).key()) + ", ms_offset=" + ts + ", older="
+              + Arrays.toString(existingVal) + ", newer=" + Arrays.toString(discardedVal)
+              + "; set tsd.storage.fix_duplicates=true to fix automatically or run Fsck");
+        }
+        LOG.warn("Duplicate timestamp for key=" + Arrays.toString(row.get(0).key())
+            + ", ms_offset=" + ts + ", kept=" + Arrays.toString(existingVal) + ", discarded="
+            + Arrays.toString(discardedVal));
+      } else {
+        duplicates_same.incrementAndGet();
+      }
+    } else {
+      prevTs = ts;
+      col.writeToBuffers(compacted_qual, compacted_val);
+      ms_in_row |= col.isMilliseconds();
+      s_in_row |= !col.isMilliseconds();
+    }
+    if (col.advance()) {
+      // there is still more data in this column, so add it back to the heap
+      heap.add(col);
+    }
+  }
+}
+```
+
+### 3.3 从合并后的列表中得到压缩后的数据点
+
+将上一步得到的两个 ByteBufferList 转换成 byte 数组，便得到了压缩后单个数据点的 column qualifier 和 column value。转换的逻辑也非常简单，就是简单的拼接。例如：
+
+压缩前：
+
+```
+数据点 1：qualifier = \xA0\xA0    value = \x10
+数据点 2: qualifier = \xBD\xB0    value = \x11
+```
+
+压缩后：
+
+```
+数据点：qualifier = \xA0\xA0\xBD\xB0    value = \x10\x11
+```
+
+如果压缩前的数据点中秒级和毫秒级数据都有的话，value 后边还会加一位 flag 来标识一下。
+
+`class: net.opentsdb.core`
+
+```
+/**
+ * Build the compacted column from the list of byte buffers that were
+ * merged together.
+ *
+ * @param compacted_qual list of merged qualifiers
+ * @param compacted_val list of merged values
+ *
+ * @return {@link KeyValue} instance for the compacted column
+ */
+private KeyValue buildCompactedColumn(ByteBufferList compacted_qual,
+    ByteBufferList compacted_val) {
+  // metadata is a single byte for a multi-value column, otherwise nothing
+  final int metadata_length = compacted_val.segmentCount() > 1 ? 1 : 0;
+  final byte[] cq = compacted_qual.toBytes(0);
+  final byte[] cv = compacted_val.toBytes(metadata_length);
+
+  // add the metadata flag, which right now only includes whether we mix s/ms datapoints
+  if (metadata_length > 0) {
+    byte metadata_flag = 0;
+    if (ms_in_row && s_in_row) {
+      metadata_flag |= Const.MS_MIXED_COMPACT;
+    }
+    cv[cv.length - 1] = metadata_flag;
+  }
+
+  final KeyValue first = row.get(0);
+  return new KeyValue(first.key(), first.family(), cq, cv);
+}
+```
+
+
+
+
+
