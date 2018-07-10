@@ -4,6 +4,8 @@ typora-copy-images-to: ..\md-Hbase-Doc
 
 # 简明HBase入门教程-开篇
 
+http://www.nosqlnotes.com/technotes/hbase/hbase-overview-concepts/
+
 这是HBase入门系列的第1篇文章，介绍HBase的数据模型、适用场景、集群关键角色、建表流程以及所涉及的HBase基础概念，本文内容基于HBase 2.0 beta2版本。本文既适用于HBase新手，也适用于已有一定经验的HBase开发人员。
 
 > **一些常见的HBase新手问题**
@@ -372,6 +374,8 @@ AssignmentManager负责所有Regions的分配/迁移操作，Master中有一个�
 
 # 简明HBase入门教程-Write全流程
 
+http://www.nosqlnotes.com/technotes/hbase/hbase-overview-writeflow/
+
 如果将上篇内容理解为一个冗长的”铺垫”，那么，从本文开始，剧情才开始正式展开。本文基于提供的样例数据，介绍了写数据的接口，RowKey定义，数据在客户端的组装，数据路由，打包分发，以及RegionServer侧将数据写入到Region中的全部流程。
 
 **本文整体思路：**
@@ -417,3 +421,97 @@ AssignmentManager负责所有Regions的分配/迁移操作，Master中有一个�
 给出一份我们日常都可以接触到的数据样例，先简单给出示例数据的字段定义： 
 
 ![Data-Sample-Definition](C:\Work\Source\docs\md-doc\md-Hbase-Doc\Data-Sample-Definition-1531216616650.jpg) 
+
+本文力求简洁，仅给出了最简单的几个字段定义。如下是”虚构”的样例数据： 
+
+![Data-Sample](http://www.nosqlnotes.com/wp-content/uploads/2018/03/Data-Sample.jpg) 
+
+
+
+在本文大部分内容中所涉及的一条数据，是上面加粗的最后一行”**Mobile1**“为”**13400006666**“这行记录。 
+
+在下面的流程图中，我们使用下面这样一个红色小图标来表示该数据所在的位置： 
+
+![data](C:\Work\Source\docs\md-doc\md-Hbase-Doc\data.png)
+
+## 写数据
+
+### 可选接口
+
+HBase中提供了如下几种主要的接口： 
+
+- **Java Client API** 
+
+HBase的基础API，应用最为广泛。 
+
+- **HBase Shell** 
+
+基于Shell的命令行操作接口，基于Java Client API实现。 
+
+- **Restful API** 
+
+Rest Server侧基于Java Client API实现。 
+
+- **Thrift API** 
+
+Thrift Server侧基于Java Client API实现。 
+
+- **MapReduce Based Batch Manipulation API** 
+
+基于MapReduce的批量数据读写API。 
+
+
+
+除了上述主要的API，HBase还提供了**基于Spark的批量操作接口**以及**C++ Client**接口，但这两个特性都被规划在了3.0版本中，当前尚在开发中。 
+
+无论是HBase Shell/Restful API还是Thrift API，都是基于Java Client API实现的。因此，接下来关于流程的介绍，都是基于Java Client API的调用流程展开的。 
+
+
+
+### 关于表服务接口的抽象
+
+同步连接与异步连接，分别提供了不同的表服务接口抽象： 
+
+- Table 同步连接中的表服务接口定义 
+- AsyncTable 异步连接中的表服务接口定义 
+
+异步连接AsyncConnection获取AsyncTable实例的接口默认实现： 
+
+```
+default AsyncTable<AdvancedScanResultConsumer> getTable(TableName tableName) {
+    return getTableBuilder(tableName).build();
+}
+```
+
+同步连接ClusterConnection的实现类ConnectionImplementation中获取Table实例的接口实现： 
+
+```
+@Override
+public Table getTable(TableName tableName) throws IOException {
+    return getTable(tableName, getBatchPool());
+}
+```
+
+### 写数据的几种方式
+
+**Single Put** 
+
+单条记录单条记录的随机put操作。Single Put所对应的接口定义如下： 
+
+在AsyncTable接口中的定义： 
+
+```
+CompletableFuture<Void> put(Put put);
+```
+
+在Table接口中的定义： 
+
+```
+void put(Put put) throws IOException;
+```
+
+**Batch Put** 
+
+汇聚了几十条甚至是几百上千条记录之后的**小批次**随机put操作。 
+
+Batch Put只是本文对该类型操作的称法，实际的接口名称如下所示： 
