@@ -749,17 +749,110 @@ HBase也采用了LSM-Tree的架构设计：LSM-Tree利用了传统机械硬盘�
 
 
 
+#### WAL进阶内容
+
+##### WAL Roll and Archive
+
+当正在写的WAL文件达到一定大小以后，会创建一个新的WAL文件，上一个WAL文件依然需要被保留，因为这个WAL文件中所关联的Region中的数据，尚未被持久化存储，因此，该WAL可能会被用来回放数据。
+
+![RollWAL](/RollWAL.jpg)
+
+
+
+如果一个WAL中所关联的所有的Region中的数据，都已经被持久化存储了，那么，这个WAL文件会被暂时归档到另外一个目录中：
+
+![WAL_Archivement](/WAL_Archivement.jpg)
+
+注意，这里不是直接将WAL文件删除掉，这是一种稳妥且合理的做法，原因如下：
+
+1. 避免因为逻辑实现上的问题导致WAL被误删，暂时归档到另外一个目录，为错误发现预留了一定的时间窗口
+2. 按时间维度组织的WAL数据文件还可以被用于其它用途，如增量备份，跨集群容灾等等，因此，这些WAL文件通常不允许直接被删除，至于何时可以被清理，还需要额外的控制逻辑
+
+另外，如果对写入HBase中的数据的可靠性要求不高，那么，HBase允许通过配置跳过写WAL操作。
+
+
+
+> **思考：put与batch put的性能为何差别巨大？**
+>
+> 在网络分发上，batch put已经具备一定的优势，因为batch put是打包分发的。
+>
+> 而从写WAL这块，看的出来，batch put写入的一小批次Put对象，可以通过一次sync就持久化到WAL文件中了，有效减少了IOPS。
+>
+> 但前面也提到了，batch size并不是越大越好，因为每一个batch在RegionServer端是被串行处理的。
+
+##### 利用**Disruptor**提升写并发性能
+
+在高并发随机写入场景下，会带来大量的WAL Sync操作，HBase中采用了Disruptor的RingBuffer来减少竞争，思路是这样：如果将瞬间并发写入WAL中的数据，合并执行Sync操作，可以有效降低Sync操作的次数，来提升写吞吐量。
+
+
+
+##### Multi-WAL
+
+默认情形下，一个RegionServer只有一个被写入的WAL Writer，尽管WAL Writer依靠顺序写提升写吞吐量，在基于普通机械硬盘的配置下，此时只能有单块盘发挥作用，其它盘的IOPS能力并没有被充分利用起来，这是Multi-WAL设计的初衷。Multi-WAL可以在一个RegionServer中同时启动几个WAL Writer，可按照一定的策略，将一个Region与其中某一个WAL Writer绑定，这样可以充分发挥多块盘的性能优势。
+
+
+
+##### 关于WAL的未来
+
+WAL是基于机械硬盘的IO模型设计的，而对于新兴的非易失性介质，如3D XPoint，WAL未来可能会失去存在的意义，关于这部分内容，请参考文章[《从HBase中移除WAL？3D XPoint技术带来的变革》](http://www.nosqlnotes.com/technotes/hbase-on-aep/)。
+
+
+
+### Region内部处理：写MemStore
+
+每一个Column Family，在Region内部被抽象为了一个HStore对象，而每一个HStore拥有自身的MemStore，用来缓存一批最近被随机写入的数据，这是LSM-Tree核心设计的一部分。
+
+MemStore中用来存放所有的KeyValue的数据结构，称之为CellSet，而CellSet的核心是一个ConcurrentSkipListMap，我们知道，ConcurrentSkipListMap是Java的跳表实现，数据按照Key值有序存放，而且在高并发写入时，性能远高于ConcurrentHashMap。
+
+因此，写MemStore的过程，事实上是将batch put提交过来的所有的KeyValue列表，写入到MemStore的以ConcurrentSkipListMap为组成核心的CellSet中：
+
+![WriteIntoMemStore](/WriteIntoMemStore.jpg)
+
+MemStore因为涉及到大量的随机写入操作，会带来大量Java小对象的创建与消亡，会导致大量的内存碎片，给GC带来比较重的压力，HBase为了优化这里的机制，借鉴了操作系统的内存分页的技术，增加了一个名为MSLab的特性，通过分配一些固定大小的Chunk，来存储MemStore中的数据，这样可以有效减少内存碎片问题，降低GC的压力。当然，ConcurrentSkipListMap本身也会创建大量的对象，这里也有很大的优化空间，去年阿里的一篇文章透露了阿里如何通过优化ConcurrentSkipListMap的结构来有效减少GC时间。
+
+
+
+> **进阶内容2：先写WAL还是先写MemStore?**
+>
+> 0.94版本之前，Region中的写入顺序是先写WAL再写MemStore，这与WAL的定义也相符。
+>
+> 但在0.94版本中，将这两者的顺序颠倒了，当时颠倒的初衷，是为了使得行锁能够在WAL sync之前先释放，从而可以提升针对单行数据的更新性能。详细问题单，请参考HBASE-4528。
+>
+> 在2.0版本中，这一行为又被改回去了，原因在于修改了行锁机制以后(下面章节将讲到)，发现了一些性能下降，而HBASE-4528中的优化却无法再发挥作用，详情请参考HBASE-15158。改动之后的逻辑也更简洁了。
+
+> **进阶内容3：关于行级别的ACID**
+>
+> 在之前的版本中，行级别的任何并发写入/更新都是互斥的，由一个行锁控制。但在2.0版本中，这一点行为发生了变化，多个线程可以同时更新一行数据，这里的考虑点为：
+>
+> 
+>
+> 如果多个线程写入同一行的不同列族，是不需要互斥的
+>
+> 多个线程写同一行的相同列族，也不需要互斥，即使是写相同的列，也完全可以通过HBase的MVCC机制来控制数据的一致性
+>
+> 当然，CAS操作(如checkAndPut)或increment操作，依然需要独占的行锁
+>
+> 更多详细信息，可以参考HBASE-12751。
+
+至此，这条数据已经被同时成功写到了WAL以及MemStore中：
+
+![DataWrittenInHBase](/DataWrittenInHBase.jpg)
 
 
 
 
 
+## 总结
 
+本文主要内容总结如下：
 
+1. 介绍HBase写数据可选接口以及接口定义。
+2. 通过一个样例，介绍了RowKey定义以及列定义的一些方法，以及如何组装Put对象
+3. 数据路由，数据分发、打包，以及Client通过RPC发送写数据请求至RegionServer
+4. RegionServer接收数据以后，将数据写到每一个Region中。写数据流程先写WAL再写MemStore，这里展开了一些技术细节
+5. 简单介绍了HBase权限控制模型
 
-
-
-
+需要说明的一点，本文所讲到的MemStore其实是一种”简化”后的模型，在2.0版本中，这里已经变的更加复杂，这些内容将在下一篇介绍Flush与Compaction的流程中详细介绍。
 
 
 
