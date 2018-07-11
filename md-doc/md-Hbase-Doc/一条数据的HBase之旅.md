@@ -1,6 +1,6 @@
 ---
 typora-copy-images-to: ../md-Hbase-Doc
-typora-root-url: ../md-Hbase-Doc
+
 ---
 
 # 简明HBase入门教程-开篇
@@ -93,11 +93,11 @@ RowKey用来表示唯一一行记录的**主键**，HBase的数据是按照RowKe
 
 ## Region
 
-区别于Cassandra/DynamoDB的”Hash分区”设计，HBase中采用了”Range分区”，将Key的完整区间切割成一个个的”Key Range” ，每一个”Key Range”称之为一个Region。也可以这么理解：将HBase中拥有数亿行的一个大表，**横向切割**成一个个”**子表**“，这一个个”**子表**“就是**Region**：![3.Regions](http://www.nosqlnotes.com/wp-content/uploads/2018/03/3.Regions.png)Region是HBase中负载均衡的基本单元，当一个Region增长到一定大小以后，会自动分裂成两个。
+区别于Cassandra/DynamoDB的”Hash分区”设计，HBase中采用了”Range分区”，将Key的完整区间切割成一个个的”Key Range” ，每一个”Key Range”称之为一个Region。也可以这么理解：将HBase中拥有数亿行的一个大表，**横向切割**成一个个”**子表**“，这一个个”**子表**“就是**Region**：![3.Regions](3.Regions.png)Region是HBase中负载均衡的基本单元，当一个Region增长到一定大小以后，会自动分裂成两个。
 
 ## Column Family
 
-如果将Region看成是一个表的**横向切割**，那么，一个Region中的数据列的**纵向切割**，称之为一个**Column Family**。每一个列，都必须归属于一个Column Family，这个归属关系是在写数据时指定的，而不是建表时预先定义。![4.RegionAndColumnFamilies](http://www.nosqlnotes.com/wp-content/uploads/2018/03/4.RegionAndColumnFamilies.png)
+如果将Region看成是一个表的**横向切割**，那么，一个Region中的数据列的**纵向切割**，称之为一个**Column Family**。每一个列，都必须归属于一个Column Family，这个归属关系是在写数据时指定的，而不是建表时预先定义。![4.RegionAndColumnFamilies](4.RegionAndColumnFamilies.png)
 
 ## KeyValue
 
@@ -427,7 +427,7 @@ http://www.nosqlnotes.com/technotes/hbase/hbase-overview-writeflow/
 
 本文力求简洁，仅给出了最简单的几个字段定义。如下是”虚构”的样例数据： 
 
-![Data-Sample](/Data-Sample.jpg) 
+![Data-Sample](Data-Sample.jpg) 
 
 
 
@@ -682,7 +682,7 @@ Region只要不被迁移，那么获取的该Region的路由信息就是一直�
 
 类似于Client发送建表到Master的流程，Client发送写数据请求到RegionServer，也是通过RPC的方式。只是，Client到Master以及Client到RegionServer，采用了不同的RPC服务接口。
 
-![Client2RegionServer](/Client2RegionServer.jpg)
+![Client2RegionServer](Client2RegionServer.jpg)
 
 single put请求与batch put请求，两者所调用的RPC服务接口方法是不同的，如下是Client.proto中的定义：
 
@@ -728,11 +728,11 @@ RegionServer的RPC Server侧，接收到来自Client端的RPC请求以后，将�
 
 HBase也采用了LSM-Tree的架构设计：LSM-Tree利用了传统机械硬盘的“**顺序读写速度远高于随机读写速度**”的特点。随机写入的数据，如果直接去改写每一个Region上的数据文件，那么吞吐量是非常差的。因此，每一个Region中随机写入的数据，都暂时先缓存在内存中(HBase中存放这部分内存数据的模块称之为**MemStore**，这里仅仅引出概念，下一章节详细介绍)，为了保障数据可靠性，将这些随机写入的数据**顺序写入**到一个称之为WAL(Write-Ahead-Log)的日志文件中，WAL中的数据按时间顺序组织：
 
-![WALAndMemStore](http://www.nosqlnotes.com/wp-content/uploads/2018/03/WALAndMemStore.jpg)
+![WALAndMemStore](WALAndMemStore.jpg)
 
 如果位于内存中的数据尚未持久化，而且突然遇到了机器断电，只需要将WAL中的数据回放到Region中即可:
 
-![WALReplay](/WALReplay.jpg)
+![WALReplay](WALReplay.jpg)
 
 
 
@@ -743,7 +743,7 @@ HBase也采用了LSM-Tree的架构设计：LSM-Tree利用了传统机械硬盘�
 
 也就是说，通常，一个Region中的一个batch put请求，会被组装成一个Entry，写入到WAL中：
 
-![WriteWAL](/WriteWAL.jpg)
+![WriteWAL](WriteWAL.jpg)
 
 将Entry写到文件中时是支持压缩的，但该特性默认未开启。
 
@@ -755,13 +755,13 @@ HBase也采用了LSM-Tree的架构设计：LSM-Tree利用了传统机械硬盘�
 
 当正在写的WAL文件达到一定大小以后，会创建一个新的WAL文件，上一个WAL文件依然需要被保留，因为这个WAL文件中所关联的Region中的数据，尚未被持久化存储，因此，该WAL可能会被用来回放数据。
 
-![RollWAL](/RollWAL.jpg)
+![RollWAL](RollWAL.jpg)
 
 
 
 如果一个WAL中所关联的所有的Region中的数据，都已经被持久化存储了，那么，这个WAL文件会被暂时归档到另外一个目录中：
 
-![WAL_Archivement](/WAL_Archivement.jpg)
+![WAL_Archivement](WAL_Archivement.jpg)
 
 注意，这里不是直接将WAL文件删除掉，这是一种稳妥且合理的做法，原因如下：
 
@@ -806,7 +806,7 @@ MemStore中用来存放所有的KeyValue的数据结构，称之为CellSet，而
 
 因此，写MemStore的过程，事实上是将batch put提交过来的所有的KeyValue列表，写入到MemStore的以ConcurrentSkipListMap为组成核心的CellSet中：
 
-![WriteIntoMemStore](/WriteIntoMemStore.jpg)
+![WriteIntoMemStore](WriteIntoMemStore.jpg)
 
 MemStore因为涉及到大量的随机写入操作，会带来大量Java小对象的创建与消亡，会导致大量的内存碎片，给GC带来比较重的压力，HBase为了优化这里的机制，借鉴了操作系统的内存分页的技术，增加了一个名为MSLab的特性，通过分配一些固定大小的Chunk，来存储MemStore中的数据，这样可以有效减少内存碎片问题，降低GC的压力。当然，ConcurrentSkipListMap本身也会创建大量的对象，这里也有很大的优化空间，去年阿里的一篇文章透露了阿里如何通过优化ConcurrentSkipListMap的结构来有效减少GC时间。
 
@@ -836,7 +836,7 @@ MemStore因为涉及到大量的随机写入操作，会带来大量Java小对�
 
 至此，这条数据已经被同时成功写到了WAL以及MemStore中：
 
-![DataWrittenInHBase](/DataWrittenInHBase.jpg)
+![DataWrittenInHBase](DataWrittenInHBase.jpg)
 
 
 
@@ -858,29 +858,168 @@ MemStore因为涉及到大量的随机写入操作，会带来大量Java小对�
 
 
 
+# 简明HBase入门教程-Flush与Compaction
+
+Flush与Compaction其实属于Write流程的继续，所以本文应该称之为”**Write后传**“。在2.0版本中，最主要的变化就是新增了In-memory Flush/Compaction，而DateTieredCompaction并不算2.0新加入的特性，2.0版本在Compaction核心算法方面并没有什么新的突破。本文将带你探讨Flush/Compaction的一些本质问题。 
+
+在阅读本文之前，希望你已经阅读过： 
+
+[一条数据的HBase之旅，简明HBase入门教程-开篇](http://www.nosqlnotes.com/technotes/hbase/hbase-overview-concepts/) 
+
+[一条数据的HBase之旅，简明HBase入门教程-Write全流程](http://www.nosqlnotes.com/technotes/hbase/hbase-overview-writeflow/) 
+
+## 前文回顾
+
+前文《一条数据的HBase之旅，简明HBase入门教程：Write全流程》主要讲了如下内容： 
+
+- 介绍HBase写数据可选接口以及接口定义
+- 通过一个样例，介绍了RowKey定义以及列定义的一些方法，以及如何组装Put对象
+- 数据路由，数据分发、打包，以及Client通过RPC发送写数据请求至RegionServer
+- RegionServer接收数据以后，将数据写到每一个Region中。写数据流程先写WAL再写MemStore，这里展开了一些技术细节
+- 简单介绍了HBase权限控制模型
+
+至此，数据已经被写入WAL与MemStore，可以说数据已经被成功写到HBase中了。事实上，上篇文章讲到的Flush流程是”简化”后的流程，在2.0版本中，这里已经变的更加复杂。 
+
+## 本文思路
+
+1. 回顾Flush & Compaction旧流程
+2. 介绍2.0版本的In-memory Flush & Compaction特性
+3. 介绍Compaction要解决的本质问题是什么
+4. 在选择合理的Compaction策略之前，用户应该从哪些维度调研自己的业务模型
+5. HBase现有的Compaction策略有哪些，各自的适用场景是什么
+6. Compaction如何选择待合并的文件
+7. 关于Compaction更多的一些思考
+8. 在文末的参考信息部分，列出了与Compaction有关的价值问题单
+
+## Flush&Compaction旧流程回顾
+
+这是1.X系列版本以及更早版本中的Flush&Compaction行为： 
+
+**MemStore中的数据，达到一定的阈值，被Flush成HDFS中的HFile文件。** 
+
+但随着Flush次数的不断增多，HFile的文件数量也会不断增多，那这会带来什么影响？在HBaseCon 2013大会上，Hontonworks的名为《Compaction Improvements in Apache HBase》的演讲主题中，提到了他们测试过的随着HFile的数量的不断增多对**读取时延**带来的影响： 
+
+![ReadLatencyWithoutCompaction](C:\Work\Source\docs\md-doc\md-Hbase-Doc\ReadLatencyWithoutCompaction.png) 
+
+尽管关于Read的流程在后面文章中才会讲到，但下图可以帮助我们简单的理解这其中的原因： 
+
+![ProblemofReadingFromMoreHFiles](C:\Work\Source\docs\md-doc\md-Hbase-Doc\ProblemofReadingFromMoreHFiles.jpg) 
 
 
 
+图中说明了从一个文件中指定RowKey为“66660000431^201803011300”的记录，以及从两个文件中读取该行记录的区别，明显，从两个文件中读取，**将导致更多的IOPS**。这就是HBase Compaction存在的一大初衷，Compaction可以将一些HFile文件合并成较大的HFile文件，也可以把所有的HFile文件合并成一个大的HFile文件，这个过程可以理解为：**将多个HFile的“交错无序状态”，变成单个HFile的“有序状态”，降低读取时延**。小范围的HFile文件合并，称之为Minor Compaction，一个列族中将所有的HFile文件合并，称之为Major Compaction。除了文件合并范围的不同之外，Major Compaction还会清理一些TTL过期/版本过旧以及被标记删除的数据。下图直观描述了旧版本中的Flush与Compaction流程： 
+
+![FlushAndCompactionOldFlow](C:\Work\Source\docs\md-doc\md-Hbase-Doc\FlushAndCompactionOldFlow.png) 
+
+## Flush
+
+在2.0版本中，Flush的行为发生了变化，默认的Flush，仅仅是将正在写的MemStore中的数据归档成一个不可变的Segment，而这个Segment依然处于**内存**中，这就是2.0的新特性：**In-memory Flush and Compaction** ~~，而且该特性在2.0版本中已被默认启用(**系统表除外**)~~。 
+
+**Update**: 该特性因为导致性能明显下降，在正式发布的2.0版本中又被**默认禁用**了，详情请参考：HBASE-20464。 
+
+上文中简单提到了MemStore的核心是一个CellSet，但到了这里，我们可以发现，MemStore的结构其实更加复杂：**MemStore由一个可写的Segment，以及一个或多个不可写的Segments构成**。 
+
+![InMemoryFlush](C:\Work\Source\docs\md-doc\md-Hbase-Doc\InMemoryFlush.png) 
+
+MemStore中的数据先Flush成一个Immutable的Segment，多个Immutable Segments可以在内存中进行Compaction，当达到一定阈值以后才将内存中的数据持久化成HDFS中的HFile文件。 
+
+看到这里，可能会有这样的疑问：**这样做的好处是什么？为何不直接调大MemStore的Flush Size？** 
+
+如果MemStore中的数据被直接Flush成HFile，而多个HFile又被Compaction合并成了一个大HFile，随着一次次Compaction发生以后，一条数据往往被重写了多次，这带来显著的IO放大问题，另外，**频繁的Compaction对IO资源的抢占，其实也是导致HBase查询时延大毛刺的罪魁祸首之一**。而In-memory Flush and Compaction特性可以有力改善这一问题。 
+
+那为何不干脆调大MemStore的大小？这里的本质原因在于，ConcurrentSkipListMap在存储的数据量达到一定大小以后，写入性能将会出现显著的恶化。 
+
+在融入了In-Memory Flush and Compaction特性之后，Flush与Compaction的整体流程演变为： 
 
 
 
+![FlushAndCompaction](C:\Work\Source\docs\md-doc\md-Hbase-Doc\FlushAndCompaction.png) 
 
 
 
+> **关于Flush执行的策略：** 
+>
+> 一个Region中是否执行Flush，原来的默认行为是通过计算Region中所有Column Family的整体大小，如果超过了一个阈值，则这个Region中所有的Column Family都会被执行Flush。 
+>
+> 2.0版本中合入了0.89-fb版本中的一个特性：HBASE-10201/HBASE-3149：Make flush decisions per column family。 
+>
+> 而2.0版本中默认启用的Flush策略为FlushAllLargeStoresPolicy，也就是说，这个策略使得每一次只Flush超出阈值大小的Column Family，如果都未超出大小，则所有的Column Family都会被Flush。 
+>
+> 改动之前，一个Region中所有的Column Family的Flush都是同步的，虽然容易导致大量的小HFile，但也有好处，尤其是对于WAL文件的快速老化，避免导致过多的WAL文件。而如果这些Column Family的Flush不同步以后，可能会导致过多的WAL文件(过多的WAL文件会触发一些拥有老数据的Column Family执行Flush)，这里需要结合业务场景实测一下。如果每一行数据的写入，多个Column Family的数据都是同步写入的，那么，这个默认策略可能并不合适。 
+
+## Compaction
+
+在这个章节，我们继续探讨HBase Compaction，主要是想理清这其中的一些”道”与”术”： 
+
+“**道**“：HBase Compaction要解决的本质问题是什么？ 
+
+“**术**“：针对HBase Compaction的问题本质，HBase有哪些具体的改进/优秀实践？ 
+
+### Compaction会导致写入放大
+
+我们先来看看Facebook在Fast 14提交的论文《Analysis of HDFS Under HBase: A Facebook Messages Case Study》所提供的一些测试结论（在我之前写的一篇文章《从HBase中移除WAL？3D XPoint技术带来的变革》已经提到过）： 
+
+> 在Facebook Messages系统中，业务读写比为99:1，而最终反映到磁盘中，读写比却变为了36:64。WAL，HDFS Replication，Compaction以及Caching，共同导致了磁盘写IO的显著放大。 
+
+虽然距离论文发表已经过去几年，但**问题本质并未发生明显变化**。尤其是在一个**写多读少**的应用中，因Compaction带来的**写放大（Write Amplification）**尤其明显，下图有助于你理解写放大的原因： 
+
+![write-amplification](C:\Work\Source\docs\md-doc\md-Hbase-Doc\write-amplification.png) 
 
 
 
+随着不断的执行Minor Compaction以及Major Compaction，可以看到，**这条数据被反复读取/写入了多次**，这是导致写放大的一个关键原因，这里的写放大，涉及到**网络IO**与**磁盘IO**，因为数据在HDFS中默认有三个副本。 
+
+### Compaction的本质
+
+我们先来思考一下，在集群中执行Compaction，本质是为了什么？容易想到如下两点原因： 
+
+- **减少HFile文件数量，减少文件句柄数量，降低读取时延** 
+- **Major Compaction可以帮助清理集群中不再需要的数据**（过期数据，被标记删除的数据，版本数溢出的数据） 
+
+很多HBase用户在集群中关闭了自动Major Compaction，为了降低Compaction对IO资源的抢占，但出于清理数据的需要，又不得不在一些非繁忙时段手动触发Major Compaction，这样既可以有效降低存储空间，也可以有效降低读取时延。 
+
+而关于如何合理的执行Compaction，我们需要**结合业务数据特点**，不断的权衡如下两点： 
+
+- **避免因文件数不断增多导致读取时延出现明显增大** 
+- **合理控制写入放大** 
+
+HFile文件数量一定会加大读取时延吗？也不一定，因为这里与**RowKey的分布特点**有关。 
+
+我们通过列举几个典型场景来说明一下不同的RowKey分布，为了方便理解，我们先将一个Region的RowKey Range进一步划分成多个Sub-Range，来说明不同的RowKey分布是如何填充这些Sub-Ranges的： 
+
+![Region-SubRanges](C:\Work\Source\docs\md-doc\md-Hbase-Doc\Region-SubRanges.png) 
+
+下面的不同行代表不同的时间点（我们使用不断递增的时间点T1,T2,T3,T4，来描述随着时间演变而产生的RowKey分布变化）： 
+
+![RowKey-Distribution-incremental](C:\Work\Source\docs\md-doc\md-Hbase-Doc\RowKey-Distribution-incremental.png) 
+
+​                                                                 **分布A** 
+
+在这个Region中，某一个时间段只填充与之有关的一个Sub-Range，RowKey随着时间的演进，**整体呈现递增趋势**。但在填充每一个Sub-Range的时候，又可能有如下两种情形（**以Sub-Range1的填充为例**，为了区别于T1~T4，我们使用了另外4个时间点Ta~Td）： 
+
+![incremental-keys](C:\Work\Source\docs\md-doc\md-Hbase-Doc\incremental-keys.png) 
+
+​                                                                  **分布A-a** 
+
+这种情形下，RowKey是严格递增的。 
+
+![range-limited-random-key](C:\Work\Source\docs\md-doc\md-Hbase-Doc\range-limited-random-key.png) 
+
+​                                                                                      **分布A-b** 
+
+这种情形下，RowKey在Sub-Range1的范围内是完全随机的。 
+
+下面则是一种随机RowKey的场景，也就是说，每一个时间点产生的数据都是随机分布在所有的Sub-Range中的： 
+
+![RowKey-Distribution-random](C:\Work\Source\docs\md-doc\md-Hbase-Doc\RowKey-Distribution-random.png) 
+
+​                                                                                               **分布B** 
+
+对于分布A-a来说，不同的HFile文件在RowKey Range（该HFile文件所涉及到的最小数据RowKey与最大数据RowKey构成的RowKey区间）上并不会产生重叠，如果要基于RowKey读取一行数据，只需要查看一个文件即可，而不需要查看所有的文件，**这里完全可以通过优化读取逻辑来实现**。即使不做Compaction，对于读取时延的影响并不明显（当然，从降低文件句柄数量，降低HDFS侧的小文件数量的维度来考虑，Compaction还是有意义的）。 
 
 
 
-
-
-
-
-
-
-
-
+对于分布B来说，如果有多个HFiles文件，如果想基于RowKey读取一行数据，则需要查看多个文件，因为不同的HFile文件的RowKey Range可能是重叠的，此时，Compaction对于降低读取时延是非常必要的。 
 
 
 
