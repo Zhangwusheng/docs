@@ -1637,7 +1637,14 @@ public Deferred<byte[]> resolveTagkName(final TSDB tsdb) {
 >
 > Because in openTSDB , the group by is one thing, the aggregate is another thing. Not like RDBMS, the agg works on the group by. In openTSDB the agg works on the downsample
 >
->
+
+感觉这里有个bUG，因为tagk在下一个循环没有重置为下一个的值。
+
+参见链接：
+
+https://github.com/OpenTSDB/opentsdb/issues/973
+
+
 
 ```java
 以下是涉及到的成员变量的声明：
