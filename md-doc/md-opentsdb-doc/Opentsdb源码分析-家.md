@@ -1322,7 +1322,7 @@ Annotation.getGlobalAnnotations->==GlobalCB==->net.opentsdb.core.TSQuery#buildQu
 
 net.opentsdb.core.TSQuery#buildQueriesAsync
 
-​		configureFromQuery->==GroupFinished==这里完成了所有的子查询的GroupBy的配置工作,返回的是子查询列表
+		configureFromQuery->==GroupFinished==这里完成了所有的子查询的GroupBy的配置工作,返回的是子查询列表
 
 
 
@@ -1544,7 +1544,7 @@ public Deferred<Object> configureFromQuery(final TSQuery query,
 
 getIdAsync->==MetricCB==->resolveTagFilters->->==FilterCB==
 
-​	resolveTagFilters->loop filters:resolveTagkName->ResolvedCB->保存到成员变量net.opentsdb.query.filter.TagVFilter.tagk_bytes
+	resolveTagFilters->loop filters:resolveTagkName->ResolvedCB->保存到成员变量net.opentsdb.query.filter.TagVFilter.tagk_bytes
 
 ```java
 class MetricCB implements Callback<Deferred<Object>, byte[]> {
@@ -1626,6 +1626,18 @@ public Deferred<byte[]> resolveTagkName(final TSDB tsdb) {
 ```
 
 #### 分组的设置
+
+
+
+> How to group by and aggregate in openTSDB like RDBMS?
+>
+> https://stackoverflow.com/questions/34648064/how-to-group-by-and-aggregate-in-opentsdb-like-rdbms
+>
+> Now way for openTSDB to do it. Also if there is requirement like this, then openTSDB may be not your choice. openTSDB is time series db, also for kariosDB. I tried in openTSDB and kariosDB and found they both can not.
+>
+> Because in openTSDB , the group by is one thing, the aggregate is another thing. Not like RDBMS, the agg works on the group by. In openTSDB the agg works on the downsample
+>
+>
 
 ```java
 以下是涉及到的成员变量的声明：
