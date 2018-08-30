@@ -1638,13 +1638,21 @@ public Deferred<byte[]> resolveTagkName(final TSDB tsdb) {
 > Because in openTSDB , the group by is one thing, the aggregate is another thing. Not like RDBMS, the agg works on the group by. In openTSDB the agg works on the downsample
 >
 
-感觉这里有个bUG，因为tagk在下一个循环没有重置为下一个的值。
-
-参见链接：
-
-https://github.com/OpenTSDB/opentsdb/issues/973
 
 
+> 感觉这里有个bUG，因为tagk在下一个循环没有重置为下一个的值。
+>
+> 后来google了一下，在如下链接找到关于这点的讨论：
+>
+> https://github.com/OpenTSDB/opentsdb/issues/973
+>
+> 不过看官方的答复，不建议有相同的tagk过滤，所以do循环体里面基本是不生效的，只看while就够了
+
+
+
+主要的思路很简单：就是找出groupBy属性为true的tagk的列表，如果这个过滤器里面能够明确确定是哪些tagv需要过滤，那么就把tagv的一串二进制字符串串起来，放到一个map里面去，用tagk的二进制编码做Key。
+
+这里会设置过滤器的setPostScan属性，因为后面数据加载进来后，会根据过滤器进行过滤，这里如果setPostScan设置为false表示，数据已经根据tagk和tagv进行了过滤，所以后续就没必要进行这一步了。因为选择出来的数据，没有符合这个过滤器的条件的了。
 
 ```java
 以下是涉及到的成员变量的声明：
@@ -1776,19 +1784,461 @@ private void findGroupBys() {
   }
 ```
 
-## 查询第一步：名称到编码
+## 
 
-然后是GlobalCB->BuildCB
+截止到目前为止，实际上已经完成了如下步骤：
 
-## 查询第二步：
+1.Annotation的加载
+
+2.tagk和tagv的名称到id的转换
+
+3.groupby的查找完成。
 
 
 
-## 查询第三步：
+这时候buildQueriesAsync就算完成了，build完成之后，会调用GroupFinished这个回调，从这个回调的名称也可以判断出，分组已经完成，GroupFinished返回的是已经转配好的TsdbQuery对象数组。
+
+接下来应该就是真正的执行这些查询了，因为该准备的都准备好了。
+
+这时候继续回到net.opentsdb.tsd.QueryRpc的handleQuery里面，可以看到，查询对象都准备好了，这时候会执行BuildCB，意思就是每个子查询都Build好了，可以执行了。
+
+## 第三步：查询执行
+
+```java
+class BuildCB implements Callback<Deferred<Object>, Query[]> {
+  @Override
+  public Deferred<Object> call(final Query[] queries) {
+    final ArrayList<Deferred<DataPoints[]>> deferreds = 
+        new ArrayList<Deferred<DataPoints[]>>(queries.length);
+    for (final Query query : queries) {
+      deferreds.add(query.runAsync());
+    }
+    return Deferred.groupInOrder(deferreds).addCallback(new QueriesCB());
+  }
+}
+```
+
+所以我们继续看，runAsync执行那些动作，这些动作执行完之后，会调用QueriesCB
 
 
 
-## 查询第四步：
+> net.opentsdb.core.TsdbQuery#runAsync
+
+```java
+@Override
+public Deferred<DataPoints[]> runAsync() throws HBaseException {
+  return findSpans().addCallback(new GroupByAndAggregateCB());
+}
+```
+
+#### 数据的处理逻辑：
+
+这里涉及到真正的数据处理逻辑了，需要理清楚数据之间的处理关系。
+
+1.数据是由时间点组成的，时间点是时间线+时间戳
+
+2.数据首先按照时间线进行分组，这个分组成为一个Span
+
+3.因为参与查询要求的GroupBy的维度一定是时间线的维度的一个子集，因此将Span按照查询的要求进行GroupBy的维度再进行一次汇总，每个分组称为SpanGroup
+
+4.降采样处理逻辑？数据过滤处理逻辑？汇总处理逻辑？
+
+5.数据不保存计算结果，而是采用了懒加载的方式，在用到时才进行计算。这是通过各种iterator来实现的，而每个iterator都实现了datapoint接口，datapoint结果包含数据最基本的元素：时间戳，值。
+
+#### 计算涉及到的数据结构：
+
+##### DataPoint
+
+```
+/**
+ * Represents a single data point.
+ * <p>
+ * Implementations of this interface aren't expected to be synchronized.
+ */
+public interface DataPoint {
+
+  /**
+   * Returns the timestamp (in milliseconds) associated with this data point.
+   * @return A strictly positive, 32 bit integer.
+   */
+  long timestamp();
+
+  /**
+   * Tells whether or not the this data point is a value of integer type.
+   * @return {@code true} if the {@code i}th value is of integer type,
+   * {@code false} if it's of doubleing point type.
+   */
+  boolean isInteger();
+
+  /**
+   * Returns the value of the this data point as a {@code long}.
+   * @throws ClassCastException if the {@code isInteger() == false}.
+   */
+  long longValue();
+
+  /**
+   * Returns the value of the this data point as a {@code double}.
+   * @throws ClassCastException if the {@code isInteger() == true}.
+   */
+  double doubleValue();
+
+  /**
+   * Returns the value of the this data point as a {@code double}, even if
+   * it's a {@code long}.
+   * @return When {@code isInteger() == false}, this method returns the same
+   * thing as {@link #doubleValue}.  Otherwise, it returns the same thing as
+   * {@link #longValue}'s return value casted to a {@code double}.
+   */
+  double toDouble();
+
+}
+```
+
+*注意这只要时间戳字段和值字段，和我们通常了解的时间点是不一样的，我们理解的时间点是包含了度量和时间线的，这里统统没有。*
+
+##### DataPoints
+
+```java
+/**
+ * Represents a read-only sequence of continuous data points.
+ * <p>
+ * Implementations of this interface aren't expected to be synchronized.
+ */
+public interface DataPoints extends Iterable<DataPoint> {
+
+  /**
+   * Returns the name of the series.
+   */
+  String metricName();
+  
+  /**
+   * Returns the name of the series.
+   * @since 1.2
+   */
+  Deferred<String> metricNameAsync();
+  
+  /**
+   * @return the metric UID
+   * @since 2.3
+   */
+  byte[] metricUID();
+
+  /**
+   * Returns the tags associated with these data points.
+   * @return A non-{@code null} map of tag names (keys), tag values (values).
+   */
+  Map<String, String> getTags();
+  
+  /**
+   * Returns the tags associated with these data points.
+   * @return A non-{@code null} map of tag names (keys), tag values (values).
+   * @since 1.2
+   */
+  Deferred<Map<String, String>> getTagsAsync();
+  
+  /**
+   * Returns a map of tag pairs as UIDs.
+   * When used on a span or row, it returns the tag set. When used on a span 
+   * group it will return only the tag pairs that are common across all 
+   * time series in the group.
+   * @return A potentially empty map of tagk to tagv pairs as UIDs
+   * @since 2.2
+   */
+  ByteMap<byte[]> getTagUids();
+
+  /**
+   * Returns the tags associated with some but not all of the data points.
+   * <p>
+   * When this instance represents the aggregation of multiple time series
+   * (same metric but different tags), {@link #getTags} returns the tags that
+   * are common to all data points (intersection set) whereas this method
+   * returns all the tags names that are not common to all data points (union
+   * set minus the intersection set, also called the symmetric difference).
+   * <p>
+   * If this instance does not represent an aggregation of multiple time
+   * series, the list returned is empty.
+   * @return A non-{@code null} list of tag names.
+   */
+  List<String> getAggregatedTags();
+  
+  /**
+   * Returns the tags associated with some but not all of the data points.
+   * <p>
+   * When this instance represents the aggregation of multiple time series
+   * (same metric but different tags), {@link #getTags} returns the tags that
+   * are common to all data points (intersection set) whereas this method
+   * returns all the tags names that are not common to all data points (union
+   * set minus the intersection set, also called the symmetric difference).
+   * <p>
+   * If this instance does not represent an aggregation of multiple time
+   * series, the list returned is empty.
+   * @return A non-{@code null} list of tag names.
+   * @since 1.2
+   */
+  Deferred<List<String>> getAggregatedTagsAsync();
+
+  /**
+   * Returns the tagk UIDs associated with some but not all of the data points. 
+   * @return a non-{@code null} list of tagk UIDs.
+   * @since 2.3
+   */
+  List<byte[]> getAggregatedTagUids();
+  
+  /**
+   * Returns a list of unique TSUIDs contained in the results
+   * @return an empty list if there were no results, otherwise a list of TSUIDs
+   */
+  public List<String> getTSUIDs();
+  
+  /**
+   * Compiles the annotations for each span into a new array list
+   * @return Null if none of the spans had any annotations, a list if one or
+   * more were found
+   */
+  public List<Annotation> getAnnotations();
+  
+  /**
+   * Returns the number of data points.
+   * <p>
+   * This method must be implemented in {@code O(1)} or {@code O(n)}
+   * where <code>n = {@link #aggregatedSize} &gt; 0</code>.
+   * @return A positive integer.
+   */
+  int size();
+
+  /**
+   * Returns the number of data points aggregated in this instance.
+   * <p>
+   * When this instance represents the aggregation of multiple time series
+   * (same metric but different tags), {@link #size} returns the number of data
+   * points after aggregation, whereas this method returns the number of data
+   * points before aggregation.
+   * <p>
+   * If this instance does not represent an aggregation of multiple time
+   * series, then 0 is returned.
+   * @return A positive integer.
+   */
+  int aggregatedSize();
+
+  /**
+   * Returns a <em>zero-copy view</em> to go through {@code size()} data points.
+   * <p>
+   * The iterator returned must return each {@link DataPoint} in {@code O(1)}.
+   * <b>The {@link DataPoint} returned must not be stored</b> and gets
+   * invalidated as soon as {@code next} is called on the iterator.  If you
+   * want to store individual data points, you need to copy the timestamp
+   * and value out of each {@link DataPoint} into your own data structures.
+   */
+  SeekableView iterator();
+
+  /**
+   * Returns the timestamp associated with the {@code i}th data point.
+   * The first data point has index 0.
+   * <p>
+   * This method must be implemented in
+   * <code>O({@link #aggregatedSize})</code> or better.
+   * <p>
+   * It is guaranteed that <pre>timestamp(i) &lt; timestamp(i+1)</pre>
+   * @return A strictly positive integer.
+   * @throws IndexOutOfBoundsException if {@code i} is not in the range
+   * <code>[0, {@link #size} - 1]</code>
+   */
+  long timestamp(int i);
+
+  /**
+   * Tells whether or not the {@code i}th value is of integer type.
+   * The first data point has index 0.
+   * <p>
+   * This method must be implemented in
+   * <code>O({@link #aggregatedSize})</code> or better.
+   * @return {@code true} if the {@code i}th value is of integer type,
+   * {@code false} if it's of floating point type.
+   * @throws IndexOutOfBoundsException if {@code i} is not in the range
+   * <code>[0, {@link #size} - 1]</code>
+   */
+  boolean isInteger(int i);
+
+  /**
+   * Returns the value of the {@code i}th data point as a long.
+   * The first data point has index 0.
+   * <p>
+   * This method must be implemented in
+   * <code>O({@link #aggregatedSize})</code> or better.
+   * Use {@link #iterator} to get successive {@code O(1)} accesses.
+   * @see #iterator
+   * @throws IndexOutOfBoundsException if {@code i} is not in the range
+   * <code>[0, {@link #size} - 1]</code>
+   * @throws ClassCastException if the
+   * <code>{@link #isInteger isInteger(i)} == false</code>.
+   */
+  long longValue(int i);
+
+  /**
+   * Returns the value of the {@code i}th data point as a float.
+   * The first data point has index 0.
+   * <p>
+   * This method must be implemented in
+   * <code>O({@link #aggregatedSize})</code> or better.
+   * Use {@link #iterator} to get successive {@code O(1)} accesses.
+   * @see #iterator
+   * @throws IndexOutOfBoundsException if {@code i} is not in the range
+   * <code>[0, {@link #size} - 1]</code>
+   * @throws ClassCastException if the
+   * <code>{@link #isInteger isInteger(i)} == true</code>.
+   */
+  double doubleValue(int i);
+
+  /**
+   * Return the query index that maps this datapoints to the original TSSubQuery.
+   * @return index of the query in the TSQuery class
+   * @throws UnsupportedOperationException if the implementing class can't map
+   * to a sub query.
+   * @since 2.2
+   */
+  int getQueryIndex();
+}
+```
+
+
+
+这个接口才和metrics关联起来，metricName，getTags，getAggregatedTags，timestamp(i)和longValue(i）等,这里获取值和获取时间戳都是带了下标的，由此可见，这个类代表了一组的数据。（）
+
+重点关注一下iterator这个函数，返回的是SeekableView，这是一个迭代器。通过它，实现了ZeroCopy数据的目的。
+
+
+
+##### SeekableView
+
+```
+/**
+ * Provides a <em>zero-copy view</em> to iterate through data points.
+ * <p>
+ * The iterator returned by classes that implement this interface must return
+ * each {@link DataPoint} in {@code O(1)} and does not support {@link #remove}.
+ * <p>
+ * Because no data is copied during iteration and no new object gets created,
+ * <b>the {@link DataPoint} returned must not be stored</b> and gets
+ * invalidated as soon as {@link #next} is called on the iterator (actually it
+ * doesn't get invalidated but rather its contents changes).  If you want to
+ * store individual data points, you need to copy the timestamp and value out
+ * of each {@link DataPoint} into your own data structures.
+ * <p>
+ * In the vast majority of cases, the iterator will be used to go once through
+ * all the data points, which is why it's not a problem if the iterator acts
+ * just as a transient "view".  Iterating will be very cheap since no memory
+ * allocation is required (except to instantiate the actual iterator at the
+ * beginning).
+ */
+public interface SeekableView extends Iterator<DataPoint> {
+
+  /**
+   * Returns {@code true} if this view has more elements.
+   */
+  boolean hasNext();
+
+  /**
+   * Returns a <em>view</em> on the next data point.
+   * No new object gets created, the referenced returned is always the same
+   * and must not be stored since its internal data structure will change the
+   * next time {@code next()} is called.
+   * @throws NoSuchElementException if there were no more elements to iterate
+   * on (in which case {@link #hasNext} would have returned {@code false}.
+   */
+  DataPoint next();
+
+  /**
+   * Unsupported operation.
+   * @throws UnsupportedOperationException always.
+   */
+  void remove();
+
+  /**
+   * Advances the iterator to the given point in time.
+   * <p>
+   * This allows the iterator to skip all the data points that are strictly
+   * before the given timestamp.
+   * @param timestamp A strictly positive 32 bit UNIX timestamp (in seconds).
+   * @throws IllegalArgumentException if the timestamp is zero, or negative,
+   * or doesn't fit on 32 bits (think "unsigned int" -- yay Java!).
+   */
+  void seek(long timestamp);
+
+}
+```
+
+
+
+##### RowSeq
+
+
+
+首先，有三个成员变量，key，qualifiers，values，有点类似Hbase的一个KeyValue了。
+
+```
+/**
+ * Represents a read-only sequence of continuous HBase rows.
+ * <p>
+ * This class stores in memory the data of one or more continuous
+ * HBase rows for a given time series. To consolidate memory, the data points
+ * are stored in two byte arrays: one for the time offsets/flags and another
+ * for the values. Access is granted via pointers.
+ */
+final class RowSeq implements DataPoints {
+
+  /** The {@link TSDB} instance we belong to. */
+  private final TSDB tsdb;
+
+  /** First row key. */
+  byte[] key;
+
+  /**
+   * Qualifiers for individual data points.
+   * <p>
+   * Each qualifier is on 2 or 4 bytes.  The last {@link Const#FLAG_BITS} bits 
+   * are used to store flags (the type of the data point - integer or floating
+   * point - and the size of the data point in bytes).  The remaining MSBs
+   * store a delta in seconds from the base timestamp stored in the row key.
+   */
+  private byte[] qualifiers;
+
+  /** Values in the row.  */
+  private byte[] values;
+
+  /**
+   * Constructor.
+   * @param tsdb The TSDB we belong to.
+   */
+  RowSeq(final TSDB tsdb) {
+    this.tsdb = tsdb;
+  }
+```
+
+
+
+使用时，在new了对象之后，一定要首先调用setRow函数。KeyValue实际上是Hbase 的一个Cell。这里会把上面的三个成员变量初始化。
+
+```
+/**
+ * Sets the row this instance holds in RAM using a row from a scanner.
+ * @param row The compacted HBase row to set.
+ * @throws IllegalStateException if this method was already called.
+ */
+void setRow(final KeyValue row) {
+  if (this.key != null) {
+    throw new IllegalStateException("setRow was already called on " + this);
+  }
+
+  this.key = row.key();
+  this.qualifiers = row.qualifier();
+  this.values = row.value();
+}
+```
+
+#### Span的查找
+
+
+
+
 
 # 其他功能：
 
