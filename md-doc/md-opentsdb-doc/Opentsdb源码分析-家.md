@@ -1,8 +1,97 @@
-查询的执行顺序：解析请求->异步执行->数据处理->格式化
+# 1.写流程
 
 
 
-# 2.查询涉及到的对象以及包含关系
+# 2.Qualifer的相关操作：
+
+1. Qualifer的生成：
+2. 比较
+
+实际操作是，判断Qualifier代表的是秒（2字节）还是毫秒（4字节），还原成整形，规整为毫秒数，比较毫秒数的大小，这个毫秒数叫offset，这个offset就是基于rowkey里面的整小时的offset。秒最多是3600秒，所以两个字节就够了。
+
+```
+/**
+ * Compares two data point byte arrays with offsets.
+ * Can be used on:
+ * <ul><li>Single data point columns</li>
+ * <li>Compacted columns</li></ul>
+ * <b>Warning:</b> Does not work on Annotation or other columns
+ * @param a The first byte array to compare
+ * @param offset_a An offset for a
+ * @param b The second byte array
+ * @param offset_b An offset for b
+ * @return 0 if they have the same timestamp, -1 if a is less than b, 1 
+ * otherwise.
+ * @since 2.0
+ */
+public static int compareQualifiers(final byte[] a, final int offset_a, 
+    final byte[] b, final int offset_b) {
+  final long left = Internal.getOffsetFromQualifier(a, offset_a);
+  final long right = Internal.getOffsetFromQualifier(b, offset_b);
+  if (left == right) {
+    return 0;
+  }
+  return (left < right) ? -1 : 1;
+}
+```
+
+```
+/**
+ * Returns the offset in milliseconds from the row base timestamp from a data
+ * point qualifier at the given offset (for compacted columns)
+ * @param qualifier The qualifier to parse
+ * @param offset An offset within the byte array
+ * @return The offset in milliseconds from the base time
+ * @throws IllegalDataException if the qualifier is null or the offset falls 
+ * outside of the qualifier array
+ * @since 2.0
+ */
+public static int getOffsetFromQualifier(final byte[] qualifier, 
+    final int offset) {
+  validateQualifier(qualifier, offset);
+  if ((qualifier[offset] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
+    return (int)(Bytes.getUnsignedInt(qualifier, offset) & 0x0FFFFFC0) 
+      >>> Const.MS_FLAG_BITS;
+  } else {
+    final int seconds = (Bytes.getUnsignedShort(qualifier, offset) & 0xFFFF) 
+      >>> Const.FLAG_BITS;
+    return seconds * 1000;
+  }
+}
+```
+
+3. 获取数据长度（数据的长度保存在Qualifier里面）
+
+```
+/**
+ * Returns the length of the value, in bytes, parsed from the qualifier
+ * @param qualifier The qualifier to parse
+ * @param offset An offset within the byte array
+ * @return The length of the value in bytes, from 1 to 8.
+ * @throws IllegalArgumentException if the qualifier is null or the offset falls
+ * outside of the qualifier array
+ * @since 2.0
+ */
+public static byte getValueLengthFromQualifier(final byte[] qualifier, 
+    final int offset) {
+  validateQualifier(qualifier, offset);    
+  short length;
+  if ((qualifier[offset] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
+    length = (short) (qualifier[offset + 3] & Internal.LENGTH_MASK); 
+  } else {
+    length = (short) (qualifier[offset + 1] & Internal.LENGTH_MASK);
+  }
+  return (byte) (length + 1);
+}
+```
+
+
+
+
+
+# 3.查询涉及到的对象以及包含关系
+
+
 
 HttpQUery------>^1^TSQuery
 
@@ -405,7 +494,7 @@ public abstract Deferred<Boolean> match(final Map<String, String> tags);
   }
 ```
 
-# 3.Opentsdb 请求解析
+# 4.Opentsdb 请求解析
 
 ## Opentsdb 查询时间解析
 
@@ -702,7 +791,8 @@ if (query.method() == HttpMethod.POST) {
 }
 ```
 
-net.opentsdb.tsd.HttpJsonSerializer#parseQueryV1
+> net.opentsdb.tsd.HttpJsonSerializer#parseQueryV1
+>
 
 ```
 public TSQuery parseQueryV1() {
@@ -1242,9 +1332,11 @@ public void validateAndSetQuery() {
 }
 ```
 
-# 4.Opentsdb 查询执行
+# 5.Opentsdb 查询执行
 
-## 1.查询的执行顺序
+查询的执行顺序：解析请求->异步执行->数据处理->格式化
+
+## 1. 查询数据的处理顺序
 
 - Filtering
 - Grouping
@@ -1255,7 +1347,7 @@ public void validateAndSetQuery() {
 - Functions
 - Expressions
 
-## 针对异常的处理：
+## 2. 针对异常的处理：
 
 > net.opentsdb.tsd.QueryRpc#handleQuery
 
@@ -1515,7 +1607,7 @@ public Deferred<Query[]> buildQueriesAsync(final TSDB tsdb) {
 }
 ```
 
-从上面的CallBack可以看出，每一个configureFromQuery
+从上面的CallBack可以看出，每一个configureFromQuery执行完毕后就执行GroupFinished把组装的tsdb_queries返回了。
 
 ### 子查询的解析构建
 
@@ -2170,6 +2262,35 @@ public interface SeekableView extends Iterator<DataPoint> {
 
 ##### RowSeq
 
+实现了DataPoints接口，3.0是直接实现了DataPoints接口；
+
+```
+public final class RowSeq implements iRowSeq {
+}
+public interface iRowSeq extends DataPoints {
+}
+```
+
+- 比较器：
+
+
+RowSeq代表的是规整到一个小时的数据，所以只要比较BaseTime（小时就够了），这里也隐含了一个条件，就是能够进行比较的RowSeq一定是其他维度相同的！这个在后面的Span实现是挂钩的，因为Span就是相同的时间线来排序的，同一个Span里面，放的是不同的RowSeq，ROwSeq里面放的是相同的RowKey里面按照Qualifer排序的数据！
+
+这样数据就排序起来了！
+
+```
+public static final class RowSeqComparator implements Comparator<iRowSeq> {
+  public int compare(final iRowSeq a, final iRowSeq b) {
+    if (a.baseTime() == b.baseTime()) {
+      return 0;
+    }
+    return a.baseTime() < b.baseTime() ? -1 : 1;
+  }
+}
+```
+
+- ##### 第一层汇聚
+
 
 
 首先，有三个成员变量，key，qualifiers，values，有点类似Hbase的一个KeyValue了。
@@ -2183,6 +2304,8 @@ public interface SeekableView extends Iterator<DataPoint> {
  * are stored in two byte arrays: one for the time offsets/flags and another
  * for the values. Access is granted via pointers.
  */
+
+3.0直接实现了DataPoints接口，2.4RC2实现了iRowSeq，而iRowSeq扩展了DataPoints接口
 final class RowSeq implements DataPoints {
 
   /** The {@link TSDB} instance we belong to. */
@@ -2217,7 +2340,7 @@ final class RowSeq implements DataPoints {
 
 使用时，在new了对象之后，一定要首先调用setRow函数。KeyValue实际上是Hbase 的一个Cell。这里会把上面的三个成员变量初始化。
 
-```
+```java
 /**
  * Sets the row this instance holds in RAM using a row from a scanner.
  * @param row The compacted HBase row to set.
@@ -2234,13 +2357,354 @@ void setRow(final KeyValue row) {
 }
 ```
 
+这里面比较重要的一个函数是AddRow：
+
+看他的注释：Merges data points for the same HBase row into the local object。主要的作用还是开启Salt的时候，合并数据用。主要是修改一下两个成员变量：qualifiers和values；
+
+1. 挨个比较已有的qualifiers和新加入的qualifiers，按照大小顺序，把数据合并到qualifiers和values
+2. 有重复的qualifier，丢弃掉。
+3. 参照qualifiers操作小节，是按照offset排序的，就是说按照时间戳的先后排序的。
+4. 这里其实应该注意一下写的时候如果时间线相同，唯一不同的是值，看看哪个值生效。（从代码看，看哪个数据先到达，被选取出来，先被选出来的，就生效，有很大的随机性）。
+
+
+
+***注意：这里其实是数据汇总的第一层！***，就是把相同的rowkey的不同Qualifer的数据先弄到一起！
+
+注意合并之后，最后面长度延长了1，专门用来保存标志位，标记是否合并后的数据；这个标志位，就是仅仅用来区分qualifer是秒（2）还是毫秒（4字节）还是混合型的！从size函数的实现可以看出来！
+
+
+
+- ##### RowSeq疑问：
+
+读取qualifer和value都是直接读取的字节值，没有判断是不是Compact的。合并之后的也是合并了很多的字节，在这里是不断的增加indx指针来实现对compact的数据的读取的！
+
+
+
+这里看不出合并后的数据怎么读取的，需要结合compact的代码！
+
+```
+/**
+ * Merges data points for the same HBase row into the local object.
+ * When executing multiple async queries simultaneously, they may call into 
+ * this method with data sets that are out of order. This may ONLY be called 
+ * after setRow() has initiated the rowseq. It also allows for rows with 
+ * different salt bucket IDs to be merged into the same sequence.
+ * @param row The compacted HBase row to merge into this instance.
+ * @throws IllegalStateException if {@link #setRow} wasn't called first.
+ * @throws IllegalArgumentException if the data points in the argument
+ * do not belong to the same row as this RowSeq
+ */
+@Override
+public void addRow(final KeyValue row) {
+  if (this.key == null) {
+    throw new IllegalStateException("setRow was never called on " + this);
+  }
+
+  final byte[] key = row.key();
+  if (Bytes.memcmp(this.key, key, Const.SALT_WIDTH(), 
+      key.length - Const.SALT_WIDTH()) != 0) {
+    throw new IllegalDataException("Attempt to add a different row="
+        + row + ", this=" + this);
+  }
+
+  final byte[] remote_qual = row.qualifier();
+  final byte[] remote_val = row.value();
+  final byte[] merged_qualifiers = new byte[qualifiers.length + remote_qual.length];
+  final byte[] merged_values = new byte[values.length + remote_val.length]; 
+
+  int remote_q_index = 0;
+  int local_q_index = 0;
+  int merged_q_index = 0;
+  
+  int remote_v_index = 0;
+  int local_v_index = 0;
+  int merged_v_index = 0;
+  short v_length;
+  short q_length;
+  while (remote_q_index < remote_qual.length || 
+      local_q_index < qualifiers.length) {
+    // if the remote q has finished, we just need to handle left over locals
+    if (remote_q_index >= remote_qual.length) {
+      v_length = Internal.getValueLengthFromQualifier(qualifiers, 
+          local_q_index);
+      System.arraycopy(values, local_v_index, merged_values, 
+          merged_v_index, v_length);
+      local_v_index += v_length;
+      merged_v_index += v_length;
+      
+      q_length = Internal.getQualifierLength(qualifiers, 
+          local_q_index);
+      System.arraycopy(qualifiers, local_q_index, merged_qualifiers, 
+          merged_q_index, q_length);
+      local_q_index += q_length;
+      merged_q_index += q_length;
+      
+      continue;
+    }
+    
+    // if the local q has finished, we need to handle the left over remotes
+    if (local_q_index >= qualifiers.length) {
+      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
+          remote_q_index);
+      System.arraycopy(remote_val, remote_v_index, merged_values, 
+          merged_v_index, v_length);
+      remote_v_index += v_length;
+      merged_v_index += v_length;
+      
+      q_length = Internal.getQualifierLength(remote_qual, 
+          remote_q_index);
+      System.arraycopy(remote_qual, remote_q_index, merged_qualifiers, 
+          merged_q_index, q_length);
+      remote_q_index += q_length;
+      merged_q_index += q_length;
+      
+      continue;
+    }
+    
+    // for dupes, we just need to skip and continue
+    // 有重复的
+    final int sort = Internal.compareQualifiers(remote_qual, remote_q_index, 
+        qualifiers, local_q_index);
+    if (sort == 0) {
+      //LOG.debug("Discarding duplicate timestamp: " + 
+      //    Internal.getOffsetFromQualifier(remote_qual, remote_q_index));
+      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
+          remote_q_index);
+      remote_v_index += v_length;
+      q_length = Internal.getQualifierLength(remote_qual, 
+          remote_q_index);
+      remote_q_index += q_length;
+      continue;
+    }
+    
+    if (sort < 0) {
+      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
+          remote_q_index);
+      System.arraycopy(remote_val, remote_v_index, merged_values, 
+          merged_v_index, v_length);
+      remote_v_index += v_length;
+      merged_v_index += v_length;
+      
+      q_length = Internal.getQualifierLength(remote_qual, 
+          remote_q_index);
+      System.arraycopy(remote_qual, remote_q_index, merged_qualifiers, 
+          merged_q_index, q_length);
+      remote_q_index += q_length;
+      merged_q_index += q_length;
+    } else {
+      v_length = Internal.getValueLengthFromQualifier(qualifiers, 
+          local_q_index);
+      System.arraycopy(values, local_v_index, merged_values, 
+          merged_v_index, v_length);
+      local_v_index += v_length;
+      merged_v_index += v_length;
+      
+      q_length = Internal.getQualifierLength(qualifiers, 
+          local_q_index);
+      System.arraycopy(qualifiers, local_q_index, merged_qualifiers, 
+          merged_q_index, q_length);
+      local_q_index += q_length;
+      merged_q_index += q_length;
+    }
+  }
+  
+  // we may have skipped some columns if we were given duplicates. Since we
+  // had allocated enough bytes to hold the incoming row, we need to shrink
+  // the final results
+  if (merged_q_index == merged_qualifiers.length) {
+    qualifiers = merged_qualifiers;
+  } else {
+    qualifiers = Arrays.copyOfRange(merged_qualifiers, 0, merged_q_index);
+  }
+  
+  // set the meta bit based on the local and remote metas
+  //这里这段话很重要，因为每个Cell有可能是秒的，也有可能是毫秒的，还有可能是合并以后的，所以就得标记
+  //如果是合并以后的数据的读取，其实上面的遍历那么已经做了
+  byte meta = 0;
+  if ((values[values.length - 1] & Const.MS_MIXED_COMPACT) == 
+                                   Const.MS_MIXED_COMPACT || 
+      (remote_val[remote_val.length - 1] & Const.MS_MIXED_COMPACT) == 
+                                           Const.MS_MIXED_COMPACT) {
+    meta = Const.MS_MIXED_COMPACT;
+  }
+  //注意这里：有一个+1操作，专门用来存放标志位的。
+  values = Arrays.copyOfRange(merged_values, 0, merged_v_index + 1);
+  values[values.length - 1] = meta;
+}
+```
+
+前面的SetRow和AddRow是RowSeq写的过程。
+
+既然RowSeq实现了DataPoints接口，那么我们看看他是怎么遍历数据以及获取数据值的：
+
+
+
+- 对应的度量和标签（此处仅仅列出度量）
+
+RowSeq对应的是一个rowkey的整行数据了，所以，这里会对应一个metrics；注意，加载的时候tsdb会缓存这些信息的，缓存的地方是tsdb这个实例；
+
+```
+public String metricName() {
+  try {
+    return metricNameAsync().joinUninterruptibly();
+  } catch (RuntimeException e) {
+    throw e;
+  } catch (Exception e) {
+    throw new RuntimeException("Should never be here", e);
+  }
+}
+```
+
+
+
+- 获取大小；
+
+  这个函数很重要，可以理解数据的组成。MIX类型的，需要遍历，秒或者毫秒类型的，常量时间；所以我们写数据的时候尽量以一种类型去写！
+
+```
+public int size() {
+  // if we don't have a mix of second and millisecond qualifiers we can run
+  // this in O(1), otherwise we have to run O(n)
+  if ((values[values.length - 1] & Const.MS_MIXED_COMPACT) == 
+    Const.MS_MIXED_COMPACT) {
+    int size = 0;
+    for (int i = 0; i < qualifiers.length; i += 2) {
+      if ((qualifiers[i] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
+        i += 2;
+      }
+      size++;
+    }
+    return size;
+  } else if ((qualifiers[0] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
+    return qualifiers.length / 4;
+  } else {
+    return qualifiers.length / 2;
+  }
+}
+```
+
+
+
+- 遍历数据：
+
+根据qual_index和value_index作为指针，不断向后移动，同时解析数据。数据的长度存放在qualifier里，同时移动value_index
+
+```
+public boolean hasNext() {
+  return qual_index < qualifiers.length;
+}
+
+public DataPoint next() {
+  if (!hasNext()) {
+    throw new NoSuchElementException("no more elements");
+  }
+  
+  if (Internal.inMilliseconds(qualifiers[qual_index])) {
+    qualifier = Bytes.getInt(qualifiers, qual_index);
+    qual_index += 4;
+  } else {
+    qualifier = Bytes.getUnsignedShort(qualifiers, qual_index);
+    qual_index += 2;
+  }
+  final byte flags = (byte) qualifier;
+  value_index += (flags & Const.LENGTH_MASK) + 1;
+  //LOG.debug("next -> now=" + toStringSummary());
+  return this;
+}
+```
+
+
+
+- Seek到指定的时间戳：和next是一样的逻辑，多了个循环；
+
+```
+public void seek(final long timestamp) {
+  if ((timestamp & Const.MILLISECOND_MASK) != 0) {  // negative or not 48 bits
+    throw new IllegalArgumentException("invalid timestamp: " + timestamp);
+  }
+  qual_index = 0;
+  value_index = 0;
+  final int len = qualifiers.length;
+  //LOG.debug("Peeking timestamp: " + (peekNextTimestamp() < timestamp));
+  while (qual_index < len && peekNextTimestamp() < timestamp) {
+    //LOG.debug("Moving to next timestamp: " + peekNextTimestamp());
+    if (Internal.inMilliseconds(qualifiers[qual_index])) {
+      qualifier = Bytes.getInt(qualifiers, qual_index);
+      qual_index += 4;
+    } else {
+      qualifier = Bytes.getUnsignedShort(qualifiers, qual_index);
+      qual_index += 2;
+    }
+    final byte flags = (byte) qualifier;
+    value_index += (flags & Const.LENGTH_MASK) + 1;
+  }
+  //LOG.debug("seek to " + timestamp + " -> now=" + toStringSummary());
+}
+```
+
+
+
+- 当前数据的时间戳获取：
+
+```
+public long timestamp() {
+  assert qual_index > 0: "not initialized: " + this;
+  if ((qualifier & Const.MS_FLAG) == Const.MS_FLAG) {
+    final long ms = (qualifier & 0x0FFFFFC0) >>> (Const.MS_FLAG_BITS);
+    return (base_time * 1000) + ms;            
+  } else {
+    final long seconds = (qualifier & 0xFFFF) >>> Const.FLAG_BITS;
+    return (base_time + seconds) * 1000;
+  }
+}
+```
+
+- 获取值：
+
+  注意：Long或者Float是与FLAG_FLOAT&，FLAG_FLOAT=0x8，就是第四个Bit表示Long或者Float；
+
+```
+public boolean isInteger() {
+  assert qual_index > 0: "not initialized: " + this;
+  return (qualifier & Const.FLAG_FLOAT) == 0x0;
+}
+
+public long longValue() {
+  if (!isInteger()) {
+    throw new ClassCastException("value @"
+      + qual_index + " is not a long in " + this);
+  }
+  final byte flags = (byte) qualifier;
+  final byte vlen = (byte) ((flags & Const.LENGTH_MASK) + 1);
+  return extractIntegerValue(values, value_index - vlen, flags);
+}
+
+public double doubleValue() {
+  if (isInteger()) {
+    throw new ClassCastException("value @"
+      + qual_index + " is not a float in " + this);
+  }
+  final byte flags = (byte) qualifier;
+  final byte vlen = (byte) ((flags & Const.LENGTH_MASK) + 1);
+  return extractFloatingPointValue(values, value_index - vlen, flags);
+}
+```
+
+##### Span
+
 #### Span的查找
 
 
 
 
 
-# 其他功能：
+# 6.Compact的实现
+
+# 7.元数据的写入
+
+# 8.批量数据的导入
+
+# 9.其他功能：
 
 ## 限流
 
