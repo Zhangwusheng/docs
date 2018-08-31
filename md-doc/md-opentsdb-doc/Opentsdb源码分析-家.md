@@ -500,7 +500,7 @@ public abstract Deferred<Boolean> match(final Map<String, String> tags);
 
 
 
-TSQuery.start_time表示查询的开始时间，以毫秒为单位
+TSQuery.start_time表示查询的开始时间，以==***<u>毫秒</u>***==为单位
 
 > 类：net.opentsdb.core.TSQuery
 >
@@ -1408,6 +1408,1259 @@ class ErrorCB implements Callback<Object, Exception> {
 }
 ```
 
+## 3.数据结构以及数据组织：
+
+#### DataPoint
+
+```
+/**
+ * Represents a single data point.
+ * <p>
+ * Implementations of this interface aren't expected to be synchronized.
+ */
+public interface DataPoint {
+
+  /**
+   * Returns the timestamp (in milliseconds) associated with this data point.
+   * @return A strictly positive, 32 bit integer.
+   */
+  long timestamp();
+
+  /**
+   * Tells whether or not the this data point is a value of integer type.
+   * @return {@code true} if the {@code i}th value is of integer type,
+   * {@code false} if it's of doubleing point type.
+   */
+  boolean isInteger();
+
+  /**
+   * Returns the value of the this data point as a {@code long}.
+   * @throws ClassCastException if the {@code isInteger() == false}.
+   */
+  long longValue();
+
+  /**
+   * Returns the value of the this data point as a {@code double}.
+   * @throws ClassCastException if the {@code isInteger() == true}.
+   */
+  double doubleValue();
+
+  /**
+   * Returns the value of the this data point as a {@code double}, even if
+   * it's a {@code long}.
+   * @return When {@code isInteger() == false}, this method returns the same
+   * thing as {@link #doubleValue}.  Otherwise, it returns the same thing as
+   * {@link #longValue}'s return value casted to a {@code double}.
+   */
+  double toDouble();
+
+}
+
+```
+
+*注意这只有时间戳字段和值字段，和我们通常了解的时间点是不一样的，我们理解的时间点是包含了度量和时间线的，这里统统没有。*
+
+#### DataPoints
+
+```java
+/**
+ * Represents a read-only sequence of continuous data points.
+ * <p>
+ * Implementations of this interface aren't expected to be synchronized.
+ */
+public interface DataPoints extends Iterable<DataPoint> {
+
+  /**
+   * Returns the name of the series.
+   */
+  String metricName();
+  
+  /**
+   * Returns the name of the series.
+   * @since 1.2
+   */
+  Deferred<String> metricNameAsync();
+  
+  /**
+   * @return the metric UID
+   * @since 2.3
+   */
+  byte[] metricUID();
+
+  /**
+   * Returns the tags associated with these data points.
+   * @return A non-{@code null} map of tag names (keys), tag values (values).
+   */
+  Map<String, String> getTags();
+  
+  /**
+   * Returns the tags associated with these data points.
+   * @return A non-{@code null} map of tag names (keys), tag values (values).
+   * @since 1.2
+   */
+  Deferred<Map<String, String>> getTagsAsync();
+  
+  /**
+   * Returns a map of tag pairs as UIDs.
+   * When used on a span or row, it returns the tag set. When used on a span 
+   * group it will return only the tag pairs that are common across all 
+   * time series in the group.
+   * @return A potentially empty map of tagk to tagv pairs as UIDs
+   * @since 2.2
+   */
+  ByteMap<byte[]> getTagUids();
+
+  /**
+   * Returns the tags associated with some but not all of the data points.
+   * <p>
+   * When this instance represents the aggregation of multiple time series
+   * (same metric but different tags), {@link #getTags} returns the tags that
+   * are common to all data points (intersection set) whereas this method
+   * returns all the tags names that are not common to all data points (union
+   * set minus the intersection set, also called the symmetric difference).
+   * <p>
+   * If this instance does not represent an aggregation of multiple time
+   * series, the list returned is empty.
+   * @return A non-{@code null} list of tag names.
+   */
+  List<String> getAggregatedTags();
+  
+  /**
+   * Returns the tags associated with some but not all of the data points.
+   * <p>
+   * When this instance represents the aggregation of multiple time series
+   * (same metric but different tags), {@link #getTags} returns the tags that
+   * are common to all data points (intersection set) whereas this method
+   * returns all the tags names that are not common to all data points (union
+   * set minus the intersection set, also called the symmetric difference).
+   * <p>
+   * If this instance does not represent an aggregation of multiple time
+   * series, the list returned is empty.
+   * @return A non-{@code null} list of tag names.
+   * @since 1.2
+   */
+  Deferred<List<String>> getAggregatedTagsAsync();
+
+  /**
+   * Returns the tagk UIDs associated with some but not all of the data points. 
+   * @return a non-{@code null} list of tagk UIDs.
+   * @since 2.3
+   */
+  List<byte[]> getAggregatedTagUids();
+  
+  /**
+   * Returns a list of unique TSUIDs contained in the results
+   * @return an empty list if there were no results, otherwise a list of TSUIDs
+   */
+  public List<String> getTSUIDs();
+  
+  /**
+   * Compiles the annotations for each span into a new array list
+   * @return Null if none of the spans had any annotations, a list if one or
+   * more were found
+   */
+  public List<Annotation> getAnnotations();
+  
+  /**
+   * Returns the number of data points.
+   * <p>
+   * This method must be implemented in {@code O(1)} or {@code O(n)}
+   * where <code>n = {@link #aggregatedSize} &gt; 0</code>.
+   * @return A positive integer.
+   */
+  int size();
+
+  /**
+   * Returns the number of data points aggregated in this instance.
+   * <p>
+   * When this instance represents the aggregation of multiple time series
+   * (same metric but different tags), {@link #size} returns the number of data
+   * points after aggregation, whereas this method returns the number of data
+   * points before aggregation.
+   * <p>
+   * If this instance does not represent an aggregation of multiple time
+   * series, then 0 is returned.
+   * @return A positive integer.
+   */
+  int aggregatedSize();
+
+  /**
+   * Returns a <em>zero-copy view</em> to go through {@code size()} data points.
+   * <p>
+   * The iterator returned must return each {@link DataPoint} in {@code O(1)}.
+   * <b>The {@link DataPoint} returned must not be stored</b> and gets
+   * invalidated as soon as {@code next} is called on the iterator.  If you
+   * want to store individual data points, you need to copy the timestamp
+   * and value out of each {@link DataPoint} into your own data structures.
+   */
+  SeekableView iterator();
+
+  /**
+   * Returns the timestamp associated with the {@code i}th data point.
+   * The first data point has index 0.
+   * <p>
+   * This method must be implemented in
+   * <code>O({@link #aggregatedSize})</code> or better.
+   * <p>
+   * It is guaranteed that <pre>timestamp(i) &lt; timestamp(i+1)</pre>
+   * @return A strictly positive integer.
+   * @throws IndexOutOfBoundsException if {@code i} is not in the range
+   * <code>[0, {@link #size} - 1]</code>
+   */
+  long timestamp(int i);
+
+  /**
+   * Tells whether or not the {@code i}th value is of integer type.
+   * The first data point has index 0.
+   * <p>
+   * This method must be implemented in
+   * <code>O({@link #aggregatedSize})</code> or better.
+   * @return {@code true} if the {@code i}th value is of integer type,
+   * {@code false} if it's of floating point type.
+   * @throws IndexOutOfBoundsException if {@code i} is not in the range
+   * <code>[0, {@link #size} - 1]</code>
+   */
+  boolean isInteger(int i);
+
+  /**
+   * Returns the value of the {@code i}th data point as a long.
+   * The first data point has index 0.
+   * <p>
+   * This method must be implemented in
+   * <code>O({@link #aggregatedSize})</code> or better.
+   * Use {@link #iterator} to get successive {@code O(1)} accesses.
+   * @see #iterator
+   * @throws IndexOutOfBoundsException if {@code i} is not in the range
+   * <code>[0, {@link #size} - 1]</code>
+   * @throws ClassCastException if the
+   * <code>{@link #isInteger isInteger(i)} == false</code>.
+   */
+  long longValue(int i);
+
+  /**
+   * Returns the value of the {@code i}th data point as a float.
+   * The first data point has index 0.
+   * <p>
+   * This method must be implemented in
+   * <code>O({@link #aggregatedSize})</code> or better.
+   * Use {@link #iterator} to get successive {@code O(1)} accesses.
+   * @see #iterator
+   * @throws IndexOutOfBoundsException if {@code i} is not in the range
+   * <code>[0, {@link #size} - 1]</code>
+   * @throws ClassCastException if the
+   * <code>{@link #isInteger isInteger(i)} == true</code>.
+   */
+  double doubleValue(int i);
+
+  /**
+   * Return the query index that maps this datapoints to the original TSSubQuery.
+   * @return index of the query in the TSQuery class
+   * @throws UnsupportedOperationException if the implementing class can't map
+   * to a sub query.
+   * @since 2.2
+   */
+  int getQueryIndex();
+}
+```
+
+
+
+这个接口才和metrics关联起来，metricName，getTags，getAggregatedTags，timestamp(i)和longValue(i）等,这里获取值和获取时间戳都是带了下标的，由此可见，这个类代表了一组的数据。（）
+
+重点关注一下iterator这个函数，返回的是SeekableView，这是一个迭代器。通过它，实现了ZeroCopy数据的目的。
+
+
+
+#### SeekableView
+
+```
+/**
+ * Provides a <em>zero-copy view</em> to iterate through data points.
+ * <p>
+ * The iterator returned by classes that implement this interface must return
+ * each {@link DataPoint} in {@code O(1)} and does not support {@link #remove}.
+ * <p>
+ * Because no data is copied during iteration and no new object gets created,
+ * <b>the {@link DataPoint} returned must not be stored</b> and gets
+ * invalidated as soon as {@link #next} is called on the iterator (actually it
+ * doesn't get invalidated but rather its contents changes).  If you want to
+ * store individual data points, you need to copy the timestamp and value out
+ * of each {@link DataPoint} into your own data structures.
+ * <p>
+ * In the vast majority of cases, the iterator will be used to go once through
+ * all the data points, which is why it's not a problem if the iterator acts
+ * just as a transient "view".  Iterating will be very cheap since no memory
+ * allocation is required (except to instantiate the actual iterator at the
+ * beginning).
+ */
+public interface SeekableView extends Iterator<DataPoint> {
+
+  /**
+   * Returns {@code true} if this view has more elements.
+   */
+  boolean hasNext();
+
+  /**
+   * Returns a <em>view</em> on the next data point.
+   * No new object gets created, the referenced returned is always the same
+   * and must not be stored since its internal data structure will change the
+   * next time {@code next()} is called.
+   * @throws NoSuchElementException if there were no more elements to iterate
+   * on (in which case {@link #hasNext} would have returned {@code false}.
+   */
+  DataPoint next();
+
+  /**
+   * Unsupported operation.
+   * @throws UnsupportedOperationException always.
+   */
+  void remove();
+
+  /**
+   * Advances the iterator to the given point in time.
+   * <p>
+   * This allows the iterator to skip all the data points that are strictly
+   * before the given timestamp.
+   * @param timestamp A strictly positive 32 bit UNIX timestamp (in seconds).
+   * @throws IllegalArgumentException if the timestamp is zero, or negative,
+   * or doesn't fit on 32 bits (think "unsigned int" -- yay Java!).
+   */
+  void seek(long timestamp);
+
+}
+
+```
+
+
+
+#### RowSeq
+
+实现了DataPoints接口，3.0是直接实现了DataPoints接口；
+
+```
+public final class RowSeq implements iRowSeq {
+}
+public interface iRowSeq extends DataPoints {
+}
+```
+
+- 比较器：
+
+RowSeq代表的是规整到一个小时的数据，所以只要比较BaseTime（小时就够了），这里也隐含了一个条件，就是能够进行比较的RowSeq一定是其他维度相同的！这个在后面的Span实现是挂钩的，因为Span就是相同的时间线来排序的，同一个Span里面，放的是不同的RowSeq，ROwSeq里面放的是相同的RowKey里面按照Qualifer排序的数据！
+
+这样数据就排序起来了！
+
+```
+public static final class RowSeqComparator implements Comparator<iRowSeq> {
+  public int compare(final iRowSeq a, final iRowSeq b) {
+    if (a.baseTime() == b.baseTime()) {
+      return 0;
+    }
+    return a.baseTime() < b.baseTime() ? -1 : 1;
+  }
+}
+
+```
+
+- ##### 第一层汇聚
+
+
+
+首先，有三个成员变量，key，qualifiers，values，有点类似Hbase的一个KeyValue了。
+
+```
+/**
+ * Represents a read-only sequence of continuous HBase rows.
+ * <p>
+ * This class stores in memory the data of one or more continuous
+ * HBase rows for a given time series. To consolidate memory, the data points
+ * are stored in two byte arrays: one for the time offsets/flags and another
+ * for the values. Access is granted via pointers.
+ */
+
+3.0直接实现了DataPoints接口，2.4RC2实现了iRowSeq，而iRowSeq扩展了DataPoints接口
+final class RowSeq implements DataPoints {
+
+  /** The {@link TSDB} instance we belong to. */
+  private final TSDB tsdb;
+
+  /** First row key. */
+  byte[] key;
+
+  /**
+   * Qualifiers for individual data points.
+   * <p>
+   * Each qualifier is on 2 or 4 bytes.  The last {@link Const#FLAG_BITS} bits 
+   * are used to store flags (the type of the data point - integer or floating
+   * point - and the size of the data point in bytes).  The remaining MSBs
+   * store a delta in seconds from the base timestamp stored in the row key.
+   */
+  private byte[] qualifiers;
+
+  /** Values in the row.  */
+  private byte[] values;
+
+  /**
+   * Constructor.
+   * @param tsdb The TSDB we belong to.
+   */
+  RowSeq(final TSDB tsdb) {
+    this.tsdb = tsdb;
+  }
+
+```
+
+
+
+使用时，在new了对象之后，一定要首先调用setRow函数。KeyValue实际上是Hbase 的一个Cell。这里会把上面的三个成员变量初始化。
+
+```java
+/**
+ * Sets the row this instance holds in RAM using a row from a scanner.
+ * @param row The compacted HBase row to set.
+ * @throws IllegalStateException if this method was already called.
+ */
+void setRow(final KeyValue row) {
+  if (this.key != null) {
+    throw new IllegalStateException("setRow was already called on " + this);
+  }
+
+  this.key = row.key();
+  this.qualifiers = row.qualifier();
+  this.values = row.value();
+}
+```
+
+这里面比较重要的一个函数是AddRow：
+
+看他的注释：Merges data points for the same HBase row into the local object。主要的作用还是开启Salt的时候，合并数据用。主要是修改一下两个成员变量：qualifiers和values；
+
+1. 挨个比较已有的qualifiers和新加入的qualifiers，按照大小顺序，把数据合并到qualifiers和values
+2. 有重复的qualifier，丢弃掉。
+3. 参照qualifiers操作小节，是按照offset排序的，就是说按照时间戳的先后排序的。
+4. 这里其实应该注意一下写的时候如果时间线相同，唯一不同的是值，看看哪个值生效。（从代码看，看哪个数据先到达，被选取出来，先被选出来的，就生效，有很大的随机性）。
+
+
+
+***注意：这里其实是数据汇总的第一层！***，就是把相同的rowkey的不同Qualifer的数据先弄到一起！
+
+注意合并之后，最后面长度延长了1，专门用来保存标志位，标记是否合并后的数据；这个标志位，就是仅仅用来区分qualifer是秒（2）还是毫秒（4字节）还是混合型的！从size函数的实现可以看出来！
+
+
+
+##### RowSeq疑问：
+
+读取qualifer和value都是直接读取的字节值，没有判断是不是Compact的。合并之后的也是合并了很多的字节，在这里是不断的增加indx指针来实现对compact的数据的读取的！
+
+
+
+这里看不出合并后的数据怎么读取的，需要结合compact的代码！
+
+```
+/**
+ * Merges data points for the same HBase row into the local object.
+ * When executing multiple async queries simultaneously, they may call into 
+ * this method with data sets that are out of order. This may ONLY be called 
+ * after setRow() has initiated the rowseq. It also allows for rows with 
+ * different salt bucket IDs to be merged into the same sequence.
+ * @param row The compacted HBase row to merge into this instance.
+ * @throws IllegalStateException if {@link #setRow} wasn't called first.
+ * @throws IllegalArgumentException if the data points in the argument
+ * do not belong to the same row as this RowSeq
+ */
+@Override
+public void addRow(final KeyValue row) {
+  if (this.key == null) {
+    throw new IllegalStateException("setRow was never called on " + this);
+  }
+
+  final byte[] key = row.key();
+  if (Bytes.memcmp(this.key, key, Const.SALT_WIDTH(), 
+      key.length - Const.SALT_WIDTH()) != 0) {
+    throw new IllegalDataException("Attempt to add a different row="
+        + row + ", this=" + this);
+  }
+
+  final byte[] remote_qual = row.qualifier();
+  final byte[] remote_val = row.value();
+  final byte[] merged_qualifiers = new byte[qualifiers.length + remote_qual.length];
+  final byte[] merged_values = new byte[values.length + remote_val.length]; 
+
+  int remote_q_index = 0;
+  int local_q_index = 0;
+  int merged_q_index = 0;
+  
+  int remote_v_index = 0;
+  int local_v_index = 0;
+  int merged_v_index = 0;
+  short v_length;
+  short q_length;
+  while (remote_q_index < remote_qual.length || 
+      local_q_index < qualifiers.length) {
+    // if the remote q has finished, we just need to handle left over locals
+    if (remote_q_index >= remote_qual.length) {
+      v_length = Internal.getValueLengthFromQualifier(qualifiers, 
+          local_q_index);
+      System.arraycopy(values, local_v_index, merged_values, 
+          merged_v_index, v_length);
+      local_v_index += v_length;
+      merged_v_index += v_length;
+      
+      q_length = Internal.getQualifierLength(qualifiers, 
+          local_q_index);
+      System.arraycopy(qualifiers, local_q_index, merged_qualifiers, 
+          merged_q_index, q_length);
+      local_q_index += q_length;
+      merged_q_index += q_length;
+      
+      continue;
+    }
+    
+    // if the local q has finished, we need to handle the left over remotes
+    if (local_q_index >= qualifiers.length) {
+      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
+          remote_q_index);
+      System.arraycopy(remote_val, remote_v_index, merged_values, 
+          merged_v_index, v_length);
+      remote_v_index += v_length;
+      merged_v_index += v_length;
+      
+      q_length = Internal.getQualifierLength(remote_qual, 
+          remote_q_index);
+      System.arraycopy(remote_qual, remote_q_index, merged_qualifiers, 
+          merged_q_index, q_length);
+      remote_q_index += q_length;
+      merged_q_index += q_length;
+      
+      continue;
+    }
+    
+    // for dupes, we just need to skip and continue
+    // 有重复的
+    final int sort = Internal.compareQualifiers(remote_qual, remote_q_index, 
+        qualifiers, local_q_index);
+    if (sort == 0) {
+      //LOG.debug("Discarding duplicate timestamp: " + 
+      //    Internal.getOffsetFromQualifier(remote_qual, remote_q_index));
+      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
+          remote_q_index);
+      remote_v_index += v_length;
+      q_length = Internal.getQualifierLength(remote_qual, 
+          remote_q_index);
+      remote_q_index += q_length;
+      continue;
+    }
+    
+    if (sort < 0) {
+      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
+          remote_q_index);
+      System.arraycopy(remote_val, remote_v_index, merged_values, 
+          merged_v_index, v_length);
+      remote_v_index += v_length;
+      merged_v_index += v_length;
+      
+      q_length = Internal.getQualifierLength(remote_qual, 
+          remote_q_index);
+      System.arraycopy(remote_qual, remote_q_index, merged_qualifiers, 
+          merged_q_index, q_length);
+      remote_q_index += q_length;
+      merged_q_index += q_length;
+    } else {
+      v_length = Internal.getValueLengthFromQualifier(qualifiers, 
+          local_q_index);
+      System.arraycopy(values, local_v_index, merged_values, 
+          merged_v_index, v_length);
+      local_v_index += v_length;
+      merged_v_index += v_length;
+      
+      q_length = Internal.getQualifierLength(qualifiers, 
+          local_q_index);
+      System.arraycopy(qualifiers, local_q_index, merged_qualifiers, 
+          merged_q_index, q_length);
+      local_q_index += q_length;
+      merged_q_index += q_length;
+    }
+  }
+  
+  // we may have skipped some columns if we were given duplicates. Since we
+  // had allocated enough bytes to hold the incoming row, we need to shrink
+  // the final results
+  if (merged_q_index == merged_qualifiers.length) {
+    qualifiers = merged_qualifiers;
+  } else {
+    qualifiers = Arrays.copyOfRange(merged_qualifiers, 0, merged_q_index);
+  }
+  
+  // set the meta bit based on the local and remote metas
+  //这里这段话很重要，因为每个Cell有可能是秒的，也有可能是毫秒的，还有可能是合并以后的，所以就得标记
+  //如果是合并以后的数据的读取，其实上面的遍历那么已经做了
+  byte meta = 0;
+  if ((values[values.length - 1] & Const.MS_MIXED_COMPACT) == 
+                                   Const.MS_MIXED_COMPACT || 
+      (remote_val[remote_val.length - 1] & Const.MS_MIXED_COMPACT) == 
+                                           Const.MS_MIXED_COMPACT) {
+    meta = Const.MS_MIXED_COMPACT;
+  }
+  //注意这里：有一个+1操作，专门用来存放标志位的。
+  values = Arrays.copyOfRange(merged_values, 0, merged_v_index + 1);
+  values[values.length - 1] = meta;
+}
+
+```
+
+前面的SetRow和AddRow是RowSeq写的过程。
+
+既然RowSeq实现了DataPoints接口，那么我们看看他是怎么遍历数据以及获取数据值的：
+
+
+
+- 对应的度量和标签（此处仅仅列出度量）
+
+RowSeq对应的是一个rowkey的整行数据了，所以，这里会对应一个metrics；注意，加载的时候tsdb会缓存这些信息的，缓存的地方是tsdb这个实例；
+
+```
+public String metricName() {
+  try {
+    return metricNameAsync().joinUninterruptibly();
+  } catch (RuntimeException e) {
+    throw e;
+  } catch (Exception e) {
+    throw new RuntimeException("Should never be here", e);
+  }
+}
+
+```
+
+
+
+- 获取大小；
+
+  这个函数很重要，可以理解数据的组成。MIX类型的，需要遍历，秒或者毫秒类型的，常量时间；所以我们写数据的时候尽量以一种类型去写！
+
+```
+public int size() {
+  // if we don't have a mix of second and millisecond qualifiers we can run
+  // this in O(1), otherwise we have to run O(n)
+  if ((values[values.length - 1] & Const.MS_MIXED_COMPACT) == 
+    Const.MS_MIXED_COMPACT) {
+    int size = 0;
+    for (int i = 0; i < qualifiers.length; i += 2) {
+      if ((qualifiers[i] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
+        i += 2;
+      }
+      size++;
+    }
+    return size;
+  } else if ((qualifiers[0] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
+    return qualifiers.length / 4;
+  } else {
+    return qualifiers.length / 2;
+  }
+}
+
+```
+
+
+
+- 遍历数据：
+
+根据qual_index和value_index作为指针，不断向后移动，同时解析数据。数据的长度存放在qualifier里，同时移动value_index
+
+```
+public boolean hasNext() {
+  return qual_index < qualifiers.length;
+}
+
+public DataPoint next() {
+  if (!hasNext()) {
+    throw new NoSuchElementException("no more elements");
+  }
+  
+  if (Internal.inMilliseconds(qualifiers[qual_index])) {
+    qualifier = Bytes.getInt(qualifiers, qual_index);
+    qual_index += 4;
+  } else {
+    qualifier = Bytes.getUnsignedShort(qualifiers, qual_index);
+    qual_index += 2;
+  }
+  final byte flags = (byte) qualifier;
+  value_index += (flags & Const.LENGTH_MASK) + 1;
+  //LOG.debug("next -> now=" + toStringSummary());
+  return this;
+}
+```
+
+
+
+- Seek到指定的时间戳：和next是一样的逻辑，多了个循环；
+
+```
+public void seek(final long timestamp) {
+  if ((timestamp & Const.MILLISECOND_MASK) != 0) {  // negative or not 48 bits
+    throw new IllegalArgumentException("invalid timestamp: " + timestamp);
+  }
+  qual_index = 0;
+  value_index = 0;
+  final int len = qualifiers.length;
+  //LOG.debug("Peeking timestamp: " + (peekNextTimestamp() < timestamp));
+  while (qual_index < len && peekNextTimestamp() < timestamp) {
+    //LOG.debug("Moving to next timestamp: " + peekNextTimestamp());
+    if (Internal.inMilliseconds(qualifiers[qual_index])) {
+      qualifier = Bytes.getInt(qualifiers, qual_index);
+      qual_index += 4;
+    } else {
+      qualifier = Bytes.getUnsignedShort(qualifiers, qual_index);
+      qual_index += 2;
+    }
+    final byte flags = (byte) qualifier;
+    value_index += (flags & Const.LENGTH_MASK) + 1;
+  }
+  //LOG.debug("seek to " + timestamp + " -> now=" + toStringSummary());
+}
+```
+
+
+
+- 当前数据的时间戳获取：
+
+  注意这里会在Span里面调用到（当把一个Row存放到Span的时候）
+
+```
+public long timestamp() {
+  assert qual_index > 0: "not initialized: " + this;
+  if ((qualifier & Const.MS_FLAG) == Const.MS_FLAG) {
+    final long ms = (qualifier & 0x0FFFFFC0) >>> (Const.MS_FLAG_BITS);
+    return (base_time * 1000) + ms;            
+  } else {
+    final long seconds = (qualifier & 0xFFFF) >>> Const.FLAG_BITS;
+    return (base_time + seconds) * 1000;
+  }
+}
+```
+
+- 获取值：
+
+  注意：Long或者Float是与FLAG_FLOAT&，FLAG_FLOAT=0x8，就是第四个Bit表示Long或者Float；
+
+```
+public boolean isInteger() {
+  assert qual_index > 0: "not initialized: " + this;
+  return (qualifier & Const.FLAG_FLOAT) == 0x0;
+}
+
+public long longValue() {
+  if (!isInteger()) {
+    throw new ClassCastException("value @"
+      + qual_index + " is not a long in " + this);
+  }
+  final byte flags = (byte) qualifier;
+  final byte vlen = (byte) ((flags & Const.LENGTH_MASK) + 1);
+  return extractIntegerValue(values, value_index - vlen, flags);
+}
+
+public double doubleValue() {
+  if (isInteger()) {
+    throw new ClassCastException("value @"
+      + qual_index + " is not a float in " + this);
+  }
+  final byte flags = (byte) qualifier;
+  final byte vlen = (byte) ((flags & Const.LENGTH_MASK) + 1);
+  return extractFloatingPointValue(values, value_index - vlen, flags);
+}
+```
+
+- getTagUids
+
+  这是一个辅助函数，把所有的tag取出来
+
+```
+public static ByteMap<byte[]> getTagUids(final byte[] row) {
+  final ByteMap<byte[]> uids = new ByteMap<byte[]>();
+  final short name_width = TSDB.tagk_width();
+  final short value_width = TSDB.tagv_width();
+  final short tag_bytes = (short) (name_width + value_width);
+  final short metric_ts_bytes = (short) (TSDB.metrics_width()
+                                         + Const.TIMESTAMP_BYTES
+                                         + Const.SALT_WIDTH());
+
+  for (short pos = metric_ts_bytes; pos < row.length; pos += tag_bytes) {
+    final byte[] tmp_name = new byte[name_width];
+    final byte[] tmp_value = new byte[value_width];
+    System.arraycopy(row, pos, tmp_name, 0, name_width);
+    System.arraycopy(row, pos + name_width, tmp_value, 0, value_width);
+    uids.put(tmp_name, tmp_value);
+  }
+  return uids;
+}
+```
+
+
+
+#### Span
+
+Span封装了RowSeq。参见成员变量rows
+
+```
+/**
+ * Represents a read-only sequence of continuous data points.
+ * <p>
+ * This class stores a continuous sequence of {@link RowSeq}s in memory.
+ */
+public class Span implements DataPoints {
+
+  private static final Logger LOG = LoggerFactory.getLogger(Span.class);
+
+  /** The {@link TSDB} instance we belong to. */
+  protected final TSDB tsdb;
+
+  /** All the rows in this span. */
+  protected final ArrayList<iRowSeq> rows = new ArrayList<iRowSeq>();
+```
+
+Span就是一系列的RowSeq，可以理解为多行数据。但是要求时间线必须相同。
+
+从下面的函数中可以看出：
+
+- Span写：
+
+```
+protected void addRow(final KeyValue row) {
+    long last_ts = 0;
+    if (rows.size() != 0) {
+      // Verify that we have the same metric id and tags.
+      final byte[] key = row.key();
+      final iRowSeq last = rows.get(rows.size() - 1);
+      final short metric_width = tsdb.metrics.width();
+      final short tags_offset = 
+          (short) (Const.SALT_WIDTH() + metric_width + Const.TIMESTAMP_BYTES);
+      final short tags_bytes = (short) (key.length - tags_offset);
+      String error = null;
+      if (key.length != last.key().length) {
+        error = "row key length mismatch";
+      } else if (
+          Bytes.memcmp(key, last.key(), Const.SALT_WIDTH(), metric_width) != 0) {
+        error = "metric ID mismatch";
+      } else if (Bytes.memcmp(key, last.key(), tags_offset, tags_bytes) != 0) {
+        error = "tags mismatch";
+      }
+      if (error != null) {
+        throw new IllegalArgumentException(error + ". "
+            + "This Span's last row key is " + Arrays.toString(last.key())
+            + " whereas the row key being added is " + Arrays.toString(key)
+            + " and metric_width=" + metric_width);
+      }
+      last_ts = last.timestamp(last.size() - 1);  // O(n)
+    }
+
+    final RowSeq rowseq = new RowSeq(tsdb);
+    rowseq.setRow(row);
+    sorted = false;
+    LOG.info("last_ts={},rowseq.timestamp(0)={}",last_ts,rowseq.timestamp(0));
+    if (last_ts >= rowseq.timestamp(0)) {
+      // scan to see if we need to merge into an existing row
+      for (final iRowSeq rs : rows) {
+        if (Bytes.memcmp(rs.key(), row.key(), Const.SALT_WIDTH(), 
+            (rs.key().length - Const.SALT_WIDTH())) == 0) {
+          rs.addRow(row);
+          return;
+        }
+      }
+    }
+
+    LOG.info("Adding row to rows as new");
+    rows.add(rowseq);
+  }
+```
+
+首先看5-25行的判断逻辑，就是比较metric_width的数据，要求metrics必须相等。然后跳过TIMESTAMP_BYTES，比较剩余的tags_bytes，要求必须相等，这就意味着必须是相同的时间线数据。但是这个Span可以包含不同小时的数据。而RowSeq 只能包含相同小时的数据。
+
+当Span为空时，直接插入到ArrayList（第45行），当下个数据到达时（33-39行），先取出已有数据的最后一条RowSeq对应的时间戳，这个时间戳是这条数据的最大的时间戳，如果这个时间戳>需要插入的数据的第一个时间戳，意味着需要插入的数据的小时时间靠前，必须寻找到合适的位置插入，注意，这个是个遍历。
+
+在查找的时候比较的是整个RowKey，这意味着必须属于相同的小时，如果找到，把这个Cell加入到那个小时的RowSeq里面去，如果没有找到，就生成一条新的RowSeq加入到ArrayList里面去（45行）；
+
+疑问：？
+
+注意ArrayList里面没有对RowSeq排序，意味着上面的遍历是对的，也意味着取得数据越多，跨小时数据越多，这里遍历的越多；
+
+添加一个新的RowSeq的两个条件：1.Span为空，2，不为空，但是这个小时的RowSeq没有。插入但是不排序！！！如果我们取一天的数据，也就是24个小时，所以这边遍历应该不会影响很大的性能。
+
+写的时候不排序，那么我们看看读的时候会不会排序？
+
+
+
+Span必须是相同时间线的，这里再次强调一次！
+
+- Span读
+
+这里对RowSeq进行了排序！
+
+写的时候排序，肯定会效率低下，读的时候排序，只排序一次！
+
+这里用到了RowSeqComparator！就是比较小时数，谁在前谁在后！
+
+```
+/**
+ * Checks the sorted flag and sorts the rows if necessary. Should be called
+ * by any iteration method.
+ * Since 2.0
+ */
+private void checkRowOrder() {
+  if (!sorted) {
+    Collections.sort(rows, new RowSeq.RowSeqComparator());
+    sorted = true;
+  }
+}
+```
+
+```
+/** Package private iterator method to access it as a Span.Iterator. */
+Iterator spanIterator() {
+  if (!sorted) {
+    Collections.sort(rows, new RowSeq.RowSeqComparator());
+    sorted = true;
+  }
+  return new Iterator();
+}
+```
+
+这个函数在net.opentsdb.core.AggregationIterator#create(java.util.List<net.opentsdb.core.Span>, long, long, net.opentsdb.core.Aggregator, net.opentsdb.core.Aggregators.Interpolation, net.opentsdb.core.Aggregator, long, boolean, net.opentsdb.core.RateOptions, net.opentsdb.core.FillPolicy)里面用到了。
+
+说明这个是用来遍历这个Span的。
+
+
+
+```
+/** Iterator for {@link Span}s. */
+final class Iterator implements SeekableView {
+
+  /** Index of the {@link RowSeq} we're currently at, in {@code rows}. */
+  private int row_index;
+
+  /** Iterator on the current row. */
+  private iRowSeq.Iterator current_row;
+
+  Iterator() {
+    current_row = rows.get(0).internalIterator();
+  }
+
+  // ------------------ //
+  // Iterator interface //
+  // ------------------ //
+  
+  @Override
+  public boolean hasNext() {
+    if (current_row.hasNext()) {
+      return true;
+    }
+    // handle situations where a row in the middle may be empty due to some
+    // kind of logic kicking out data points
+    while (row_index < rows.size() - 1) {
+      row_index++;
+      current_row = rows.get(row_index).internalIterator();
+      if (current_row.hasNext()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @Override
+  public DataPoint next() {
+    if (current_row.hasNext()) {
+      return current_row.next();
+    }
+    // handle situations where a row in the middle may be empty due to some
+    // kind of logic kicking out data points
+    while (row_index < rows.size() - 1) {
+      row_index++;
+      current_row = rows.get(row_index).internalIterator();
+      if (current_row.hasNext()) {
+        return current_row.next();
+      }
+    }
+    throw new NoSuchElementException("no more elements");
+  }
+
+  @Override
+  public void remove() {
+    throw new UnsupportedOperationException();
+  }
+
+  // ---------------------- //
+  // SeekableView interface //
+  // ---------------------- //
+  
+  @Override
+  public void seek(final long timestamp) {
+    int row_index = seekRow(timestamp);
+    if (row_index != this.row_index) {
+      this.row_index = row_index;
+      current_row = rows.get(row_index).internalIterator();
+    }
+    current_row.seek(timestamp);
+  }
+
+  @Override
+  public String toString() {
+    return "Span.Iterator(row_index=" + row_index
+      + ", current_row=" + current_row + ", span=" + Span.this + ')';
+  }
+
+}
+```
+
+上面的移动很简单，就是记住当前rowseq，如果当前row遍历完了，就移动到下一个rowseq。
+
+- 降采样
+
+注意，在Span这个类中，加入了降采样的处理，想想也是合理的，降采样就是要把数据合并和减少，合并肯定要在相同的维度合并，把时间力度扩大，这里岂不就是最好的地方？：）
+
+
+
+>  *https://stackoverflow.com/questions/34648064/how-to-group-by-and-aggregate-in-opentsdb-like-rdbms* 
+>
+> *Q：How to group by and aggregate in openTSDB like RDBMS?*
+>
+> *A:   Now way for openTSDB to do it. Also if there is requirement like this, then openTSDB may be not your choice. openTSDB is time series db, also for kariosDB. I tried in openTSDB and kariosDB and found they both can not.*
+>
+> *Because in openTSDB , the group by is one thing, the aggregate is another thing. Not like RDBMS, the agg works on the group by. In openTSDB the agg works on the downsample*
+
+```
+**
+ * Package private iterator method to access data while downsampling with the
+ * option to force interpolation.
+ * @param start_time The time in milliseconds at which the data begins.
+ * @param end_time The time in milliseconds at which the data ends.
+ * @param interval_ms The interval in milli seconds wanted between each data
+ * point.
+ * @param downsampler The downsampling function to use.
+ * @param fill_policy Policy specifying whether to interpolate or to fill
+ * missing intervals with special values.
+ * @return A new downsampler.
+ */
+Downsampler downsampler(final long start_time,
+                        final long end_time,
+                        final long interval_ms,
+                        final Aggregator downsampler,
+                        final FillPolicy fill_policy) {
+  if (FillPolicy.NONE == fill_policy) {
+    // The default downsampler simply skips missing intervals, causing the
+    // span group to linearly interpolate.
+    return new Downsampler(spanIterator(), interval_ms, downsampler);
+  } else {
+    // Otherwise, we need to instantiate a downsampler that can fill missing
+    // intervals with special values.
+    return new FillingDownsampler(spanIterator(), start_time, end_time,
+      interval_ms, downsampler, fill_policy);
+  }
+}
+```
+
+这里生成了一个Downsampler对象，最主要的是把spanIterator传过去了，这里要记住，降采样是对相同时间线不同小时的数据进行遍历进行插值计算而已！
+
+
+
+
+
+- #### 辅助函数：getTagUids
+
+获取tags，前面已经讲过，span都是同一个时间线的，所以只要获取第一个就够了！
+
+
+
+```
+@Override
+public ByteMap<byte[]> getTagUids() {
+  checkNotEmpty();
+  return rows.get(0).getTagUids();
+}
+```
+
+#### SpanGroup
+
+Span把相同时间线的不同小时的数据，都组织好了，那么SpanGroup是干什么的呢？
+
+SpanGroup是不是相同时间线的呢？不一定了！（？？？）
+
+主要的目的是针对查询提供的汇总维度进行数据组织！这里就减少了汇总的维度；Span可以理解为按照时间线通过降采样进行GroupBy统计，SpanGroup可以理解为减少时间线里面的维度，将数据按照减少后的维度进行GroupBy统计。
+
+
+
+##### 疑问：
+
+这里的spans是不是排序的还不知道！
+
+```
+SpanGroup(final TSDB tsdb,
+          final long start_time, 
+          final long end_time,
+          final Iterable<Span> spans,
+          final boolean rate, 
+          final RateOptions rate_options,
+          final Aggregator aggregator,
+          final DownsamplingSpecification downsampler, 
+          final long query_start,
+          final long query_end,
+          final int query_index,
+          final RollupQuery rollup_query) {
+   annotations = new ArrayList<Annotation>();
+   this.start_time = (start_time & Const.SECOND_MASK) == 0 ? 
+       start_time * 1000 : start_time;
+   this.end_time = (end_time & Const.SECOND_MASK) == 0 ? 
+       end_time * 1000 : end_time;
+   if (spans != null) {
+     for (final Span span : spans) {
+       add(span);
+     }
+   }
+   this.rate = rate;
+   this.rate_options = rate_options;
+   this.aggregator = aggregator;
+   this.downsampler = downsampler;
+   this.query_start = query_start;
+   this.query_end = query_end;
+   this.query_index = query_index;
+   this.rollup_query = rollup_query;
+   this.tsdb = tsdb;
+}
+```
+
+
+
+- 写数据：
+
+
+
+```
+/**
+ * Adds a span to this group, provided that it's in the right time range.
+ * <b>Must not</b> be called once {@link #getTags} or
+ * {@link #getAggregatedTags} has been called on this instance.
+ * @param span The span to add to this group.  If none of the data points
+ * fall within our time range, this method will silently ignore that span.
+ */
+void add(final Span span) {
+  if (tags != null) {
+    throw new AssertionError("The set of tags has already been computed"
+                             + ", you can't add more Spans to " + this);
+  }
+
+  // normalize timestamps to milliseconds for proper comparison
+  final long start = (start_time & Const.SECOND_MASK) == 0 ? 
+      start_time * 1000 : start_time;
+  final long end = (end_time & Const.SECOND_MASK) == 0 ? 
+      end_time * 1000 : end_time;
+
+  if (span.size() == 0) {
+    // copy annotations that are in the time range
+    for (Annotation annot : span.getAnnotations()) {
+      long annot_start = annot.getStartTime();
+      if ((annot_start & Const.SECOND_MASK) == 0) {
+        annot_start *= 1000;
+      }
+      long annot_end = annot.getStartTime();
+      if ((annot_end & Const.SECOND_MASK) == 0) {
+        annot_end *= 1000;
+      }
+      if (annot_end >= start && annot_start <= end) {
+        annotations.add(annot);
+      }
+    }
+  } else {
+    long first_dp = span.timestamp(0);
+    if ((first_dp & Const.SECOND_MASK) == 0) {
+      first_dp *= 1000;
+    }
+    // The following call to timestamp() will throw an
+    // IndexOutOfBoundsException if size == 0, which is OK since it would
+    // be a programming error.
+    long last_dp = span.timestamp(span.size() - 1);
+    if ((last_dp & Const.SECOND_MASK) == 0) {
+      last_dp *= 1000;
+    }
+    if (first_dp <= end && last_dp >= start) {
+      this.spans.add(span);
+      annotations.addAll(span.getAnnotations());
+    }
+  }
+}
+```
+
+注意上面的add函数，里面，有一个关于时间的判断逻辑：
+
+first_dp是这个Span里面时间最小的一个时间点，last_dp是这个Span里面最大的一个时间点。
+
+如果这个Span的开始结束时间与查询的开始结束时间有交集，就把这个Span加入到SpanGroup里面去。
+
+如果Span的最大时间都小于开始时间（ ！ last_dp >= start）或者最小时间都大于开始时间（！first_dp <= end ），那么很显然，这里的数据是不需要的！
+
+***<u>==这里实现了第一层的数据过滤！==</u>***
+
+
+
+
+
+##### computeTags
+
+
+
+```
+/**
+ * Computes the intersection set + symmetric difference of tags in all spans.
+ * This method loads the UID aggregated list and tag pair maps with byte arrays
+ * but does not actually resolve the UIDs to strings. 
+ * On the first run, it will initialize the UID collections (which may be empty)
+ * and subsequent calls will skip processing.
+ */
+private void computeTags() {
+  if (tag_uids != null && aggregated_tag_uids != null) {
+    return;
+  }
+  if (spans.isEmpty()) {
+    tag_uids = new ByteMap<byte[]>();
+    aggregated_tag_uids = new HashSet<byte[]>();
+    return;
+  }
+  
+  // local tag uids
+  final ByteMap<byte[]> tag_set = new ByteMap<byte[]>();
+  
+  // value is always null, we just want the set of unique keys
+  final ByteMap<byte[]> discards = new ByteMap<byte[]>();
+  final Iterator<Span> it = spans.iterator();
+  while (it.hasNext()) {
+    final Span span = it.next();
+    final ByteMap<byte[]> uids = span.getTagUids();
+    
+    for (final Map.Entry<byte[], byte[]> tag_pair : uids.entrySet()) {
+      // we already know it's an aggregated tag
+      if (discards.containsKey(tag_pair.getKey())) {
+        continue;
+      }
+      
+      final byte[] tag_value = tag_set.get(tag_pair.getKey());
+      if (tag_value == null) {
+        tag_set.put(tag_pair.getKey(), tag_pair.getValue());
+      } else if (Bytes.memcmp(tag_value, tag_pair.getValue()) != 0) {
+        // bump to aggregated tags
+        discards.put(tag_pair.getKey(), null);
+        tag_set.remove(tag_pair.getKey());
+      }
+    }
+  }
+  
+  aggregated_tag_uids = discards.keySet();
+  tag_uids = tag_set;
+}
+
+```
+
+这里遍历所有的Span的RowKey取出来的tags，如果出现了tagk相同，但是tagv不相同的，那么就把这些tagk认为是被聚合掉的，这里正好印证了SpanGroup的作用：就是查询里需要汇总的相同维度的Span会放到一个SpanGroup里面去！哈哈
+
+这样如果一个tagk出现了多个值，一定是属于被聚合掉的！
+
+
+
 ## 代码执行顺序：
 
 Annotation.getGlobalAnnotations->==GlobalCB==->net.opentsdb.core.TSQuery#buildQueriesAsync->==BuildCB==->query.runAsync->==QueriesCB==->SendIt,所有的操作都是使用ErrorCB作为错误处理机制。
@@ -1937,760 +3190,7 @@ public Deferred<DataPoints[]> runAsync() throws HBaseException {
 
 5.数据不保存计算结果，而是采用了懒加载的方式，在用到时才进行计算。这是通过各种iterator来实现的，而每个iterator都实现了datapoint接口，datapoint结果包含数据最基本的元素：时间戳，值。
 
-#### 计算涉及到的数据结构：
 
-##### DataPoint
-
-```
-/**
- * Represents a single data point.
- * <p>
- * Implementations of this interface aren't expected to be synchronized.
- */
-public interface DataPoint {
-
-  /**
-   * Returns the timestamp (in milliseconds) associated with this data point.
-   * @return A strictly positive, 32 bit integer.
-   */
-  long timestamp();
-
-  /**
-   * Tells whether or not the this data point is a value of integer type.
-   * @return {@code true} if the {@code i}th value is of integer type,
-   * {@code false} if it's of doubleing point type.
-   */
-  boolean isInteger();
-
-  /**
-   * Returns the value of the this data point as a {@code long}.
-   * @throws ClassCastException if the {@code isInteger() == false}.
-   */
-  long longValue();
-
-  /**
-   * Returns the value of the this data point as a {@code double}.
-   * @throws ClassCastException if the {@code isInteger() == true}.
-   */
-  double doubleValue();
-
-  /**
-   * Returns the value of the this data point as a {@code double}, even if
-   * it's a {@code long}.
-   * @return When {@code isInteger() == false}, this method returns the same
-   * thing as {@link #doubleValue}.  Otherwise, it returns the same thing as
-   * {@link #longValue}'s return value casted to a {@code double}.
-   */
-  double toDouble();
-
-}
-```
-
-*注意这只有时间戳字段和值字段，和我们通常了解的时间点是不一样的，我们理解的时间点是包含了度量和时间线的，这里统统没有。*
-
-##### DataPoints
-
-```java
-/**
- * Represents a read-only sequence of continuous data points.
- * <p>
- * Implementations of this interface aren't expected to be synchronized.
- */
-public interface DataPoints extends Iterable<DataPoint> {
-
-  /**
-   * Returns the name of the series.
-   */
-  String metricName();
-  
-  /**
-   * Returns the name of the series.
-   * @since 1.2
-   */
-  Deferred<String> metricNameAsync();
-  
-  /**
-   * @return the metric UID
-   * @since 2.3
-   */
-  byte[] metricUID();
-
-  /**
-   * Returns the tags associated with these data points.
-   * @return A non-{@code null} map of tag names (keys), tag values (values).
-   */
-  Map<String, String> getTags();
-  
-  /**
-   * Returns the tags associated with these data points.
-   * @return A non-{@code null} map of tag names (keys), tag values (values).
-   * @since 1.2
-   */
-  Deferred<Map<String, String>> getTagsAsync();
-  
-  /**
-   * Returns a map of tag pairs as UIDs.
-   * When used on a span or row, it returns the tag set. When used on a span 
-   * group it will return only the tag pairs that are common across all 
-   * time series in the group.
-   * @return A potentially empty map of tagk to tagv pairs as UIDs
-   * @since 2.2
-   */
-  ByteMap<byte[]> getTagUids();
-
-  /**
-   * Returns the tags associated with some but not all of the data points.
-   * <p>
-   * When this instance represents the aggregation of multiple time series
-   * (same metric but different tags), {@link #getTags} returns the tags that
-   * are common to all data points (intersection set) whereas this method
-   * returns all the tags names that are not common to all data points (union
-   * set minus the intersection set, also called the symmetric difference).
-   * <p>
-   * If this instance does not represent an aggregation of multiple time
-   * series, the list returned is empty.
-   * @return A non-{@code null} list of tag names.
-   */
-  List<String> getAggregatedTags();
-  
-  /**
-   * Returns the tags associated with some but not all of the data points.
-   * <p>
-   * When this instance represents the aggregation of multiple time series
-   * (same metric but different tags), {@link #getTags} returns the tags that
-   * are common to all data points (intersection set) whereas this method
-   * returns all the tags names that are not common to all data points (union
-   * set minus the intersection set, also called the symmetric difference).
-   * <p>
-   * If this instance does not represent an aggregation of multiple time
-   * series, the list returned is empty.
-   * @return A non-{@code null} list of tag names.
-   * @since 1.2
-   */
-  Deferred<List<String>> getAggregatedTagsAsync();
-
-  /**
-   * Returns the tagk UIDs associated with some but not all of the data points. 
-   * @return a non-{@code null} list of tagk UIDs.
-   * @since 2.3
-   */
-  List<byte[]> getAggregatedTagUids();
-  
-  /**
-   * Returns a list of unique TSUIDs contained in the results
-   * @return an empty list if there were no results, otherwise a list of TSUIDs
-   */
-  public List<String> getTSUIDs();
-  
-  /**
-   * Compiles the annotations for each span into a new array list
-   * @return Null if none of the spans had any annotations, a list if one or
-   * more were found
-   */
-  public List<Annotation> getAnnotations();
-  
-  /**
-   * Returns the number of data points.
-   * <p>
-   * This method must be implemented in {@code O(1)} or {@code O(n)}
-   * where <code>n = {@link #aggregatedSize} &gt; 0</code>.
-   * @return A positive integer.
-   */
-  int size();
-
-  /**
-   * Returns the number of data points aggregated in this instance.
-   * <p>
-   * When this instance represents the aggregation of multiple time series
-   * (same metric but different tags), {@link #size} returns the number of data
-   * points after aggregation, whereas this method returns the number of data
-   * points before aggregation.
-   * <p>
-   * If this instance does not represent an aggregation of multiple time
-   * series, then 0 is returned.
-   * @return A positive integer.
-   */
-  int aggregatedSize();
-
-  /**
-   * Returns a <em>zero-copy view</em> to go through {@code size()} data points.
-   * <p>
-   * The iterator returned must return each {@link DataPoint} in {@code O(1)}.
-   * <b>The {@link DataPoint} returned must not be stored</b> and gets
-   * invalidated as soon as {@code next} is called on the iterator.  If you
-   * want to store individual data points, you need to copy the timestamp
-   * and value out of each {@link DataPoint} into your own data structures.
-   */
-  SeekableView iterator();
-
-  /**
-   * Returns the timestamp associated with the {@code i}th data point.
-   * The first data point has index 0.
-   * <p>
-   * This method must be implemented in
-   * <code>O({@link #aggregatedSize})</code> or better.
-   * <p>
-   * It is guaranteed that <pre>timestamp(i) &lt; timestamp(i+1)</pre>
-   * @return A strictly positive integer.
-   * @throws IndexOutOfBoundsException if {@code i} is not in the range
-   * <code>[0, {@link #size} - 1]</code>
-   */
-  long timestamp(int i);
-
-  /**
-   * Tells whether or not the {@code i}th value is of integer type.
-   * The first data point has index 0.
-   * <p>
-   * This method must be implemented in
-   * <code>O({@link #aggregatedSize})</code> or better.
-   * @return {@code true} if the {@code i}th value is of integer type,
-   * {@code false} if it's of floating point type.
-   * @throws IndexOutOfBoundsException if {@code i} is not in the range
-   * <code>[0, {@link #size} - 1]</code>
-   */
-  boolean isInteger(int i);
-
-  /**
-   * Returns the value of the {@code i}th data point as a long.
-   * The first data point has index 0.
-   * <p>
-   * This method must be implemented in
-   * <code>O({@link #aggregatedSize})</code> or better.
-   * Use {@link #iterator} to get successive {@code O(1)} accesses.
-   * @see #iterator
-   * @throws IndexOutOfBoundsException if {@code i} is not in the range
-   * <code>[0, {@link #size} - 1]</code>
-   * @throws ClassCastException if the
-   * <code>{@link #isInteger isInteger(i)} == false</code>.
-   */
-  long longValue(int i);
-
-  /**
-   * Returns the value of the {@code i}th data point as a float.
-   * The first data point has index 0.
-   * <p>
-   * This method must be implemented in
-   * <code>O({@link #aggregatedSize})</code> or better.
-   * Use {@link #iterator} to get successive {@code O(1)} accesses.
-   * @see #iterator
-   * @throws IndexOutOfBoundsException if {@code i} is not in the range
-   * <code>[0, {@link #size} - 1]</code>
-   * @throws ClassCastException if the
-   * <code>{@link #isInteger isInteger(i)} == true</code>.
-   */
-  double doubleValue(int i);
-
-  /**
-   * Return the query index that maps this datapoints to the original TSSubQuery.
-   * @return index of the query in the TSQuery class
-   * @throws UnsupportedOperationException if the implementing class can't map
-   * to a sub query.
-   * @since 2.2
-   */
-  int getQueryIndex();
-}
-```
-
-
-
-这个接口才和metrics关联起来，metricName，getTags，getAggregatedTags，timestamp(i)和longValue(i）等,这里获取值和获取时间戳都是带了下标的，由此可见，这个类代表了一组的数据。（）
-
-重点关注一下iterator这个函数，返回的是SeekableView，这是一个迭代器。通过它，实现了ZeroCopy数据的目的。
-
-
-
-##### SeekableView
-
-```
-/**
- * Provides a <em>zero-copy view</em> to iterate through data points.
- * <p>
- * The iterator returned by classes that implement this interface must return
- * each {@link DataPoint} in {@code O(1)} and does not support {@link #remove}.
- * <p>
- * Because no data is copied during iteration and no new object gets created,
- * <b>the {@link DataPoint} returned must not be stored</b> and gets
- * invalidated as soon as {@link #next} is called on the iterator (actually it
- * doesn't get invalidated but rather its contents changes).  If you want to
- * store individual data points, you need to copy the timestamp and value out
- * of each {@link DataPoint} into your own data structures.
- * <p>
- * In the vast majority of cases, the iterator will be used to go once through
- * all the data points, which is why it's not a problem if the iterator acts
- * just as a transient "view".  Iterating will be very cheap since no memory
- * allocation is required (except to instantiate the actual iterator at the
- * beginning).
- */
-public interface SeekableView extends Iterator<DataPoint> {
-
-  /**
-   * Returns {@code true} if this view has more elements.
-   */
-  boolean hasNext();
-
-  /**
-   * Returns a <em>view</em> on the next data point.
-   * No new object gets created, the referenced returned is always the same
-   * and must not be stored since its internal data structure will change the
-   * next time {@code next()} is called.
-   * @throws NoSuchElementException if there were no more elements to iterate
-   * on (in which case {@link #hasNext} would have returned {@code false}.
-   */
-  DataPoint next();
-
-  /**
-   * Unsupported operation.
-   * @throws UnsupportedOperationException always.
-   */
-  void remove();
-
-  /**
-   * Advances the iterator to the given point in time.
-   * <p>
-   * This allows the iterator to skip all the data points that are strictly
-   * before the given timestamp.
-   * @param timestamp A strictly positive 32 bit UNIX timestamp (in seconds).
-   * @throws IllegalArgumentException if the timestamp is zero, or negative,
-   * or doesn't fit on 32 bits (think "unsigned int" -- yay Java!).
-   */
-  void seek(long timestamp);
-
-}
-```
-
-
-
-##### RowSeq
-
-实现了DataPoints接口，3.0是直接实现了DataPoints接口；
-
-```
-public final class RowSeq implements iRowSeq {
-}
-public interface iRowSeq extends DataPoints {
-}
-```
-
-- 比较器：
-
-
-RowSeq代表的是规整到一个小时的数据，所以只要比较BaseTime（小时就够了），这里也隐含了一个条件，就是能够进行比较的RowSeq一定是其他维度相同的！这个在后面的Span实现是挂钩的，因为Span就是相同的时间线来排序的，同一个Span里面，放的是不同的RowSeq，ROwSeq里面放的是相同的RowKey里面按照Qualifer排序的数据！
-
-这样数据就排序起来了！
-
-```
-public static final class RowSeqComparator implements Comparator<iRowSeq> {
-  public int compare(final iRowSeq a, final iRowSeq b) {
-    if (a.baseTime() == b.baseTime()) {
-      return 0;
-    }
-    return a.baseTime() < b.baseTime() ? -1 : 1;
-  }
-}
-```
-
-- ##### 第一层汇聚
-
-
-
-首先，有三个成员变量，key，qualifiers，values，有点类似Hbase的一个KeyValue了。
-
-```
-/**
- * Represents a read-only sequence of continuous HBase rows.
- * <p>
- * This class stores in memory the data of one or more continuous
- * HBase rows for a given time series. To consolidate memory, the data points
- * are stored in two byte arrays: one for the time offsets/flags and another
- * for the values. Access is granted via pointers.
- */
-
-3.0直接实现了DataPoints接口，2.4RC2实现了iRowSeq，而iRowSeq扩展了DataPoints接口
-final class RowSeq implements DataPoints {
-
-  /** The {@link TSDB} instance we belong to. */
-  private final TSDB tsdb;
-
-  /** First row key. */
-  byte[] key;
-
-  /**
-   * Qualifiers for individual data points.
-   * <p>
-   * Each qualifier is on 2 or 4 bytes.  The last {@link Const#FLAG_BITS} bits 
-   * are used to store flags (the type of the data point - integer or floating
-   * point - and the size of the data point in bytes).  The remaining MSBs
-   * store a delta in seconds from the base timestamp stored in the row key.
-   */
-  private byte[] qualifiers;
-
-  /** Values in the row.  */
-  private byte[] values;
-
-  /**
-   * Constructor.
-   * @param tsdb The TSDB we belong to.
-   */
-  RowSeq(final TSDB tsdb) {
-    this.tsdb = tsdb;
-  }
-```
-
-
-
-使用时，在new了对象之后，一定要首先调用setRow函数。KeyValue实际上是Hbase 的一个Cell。这里会把上面的三个成员变量初始化。
-
-```java
-/**
- * Sets the row this instance holds in RAM using a row from a scanner.
- * @param row The compacted HBase row to set.
- * @throws IllegalStateException if this method was already called.
- */
-void setRow(final KeyValue row) {
-  if (this.key != null) {
-    throw new IllegalStateException("setRow was already called on " + this);
-  }
-
-  this.key = row.key();
-  this.qualifiers = row.qualifier();
-  this.values = row.value();
-}
-```
-
-这里面比较重要的一个函数是AddRow：
-
-看他的注释：Merges data points for the same HBase row into the local object。主要的作用还是开启Salt的时候，合并数据用。主要是修改一下两个成员变量：qualifiers和values；
-
-1. 挨个比较已有的qualifiers和新加入的qualifiers，按照大小顺序，把数据合并到qualifiers和values
-2. 有重复的qualifier，丢弃掉。
-3. 参照qualifiers操作小节，是按照offset排序的，就是说按照时间戳的先后排序的。
-4. 这里其实应该注意一下写的时候如果时间线相同，唯一不同的是值，看看哪个值生效。（从代码看，看哪个数据先到达，被选取出来，先被选出来的，就生效，有很大的随机性）。
-
-
-
-***注意：这里其实是数据汇总的第一层！***，就是把相同的rowkey的不同Qualifer的数据先弄到一起！
-
-注意合并之后，最后面长度延长了1，专门用来保存标志位，标记是否合并后的数据；这个标志位，就是仅仅用来区分qualifer是秒（2）还是毫秒（4字节）还是混合型的！从size函数的实现可以看出来！
-
-
-
-- ##### RowSeq疑问：
-
-读取qualifer和value都是直接读取的字节值，没有判断是不是Compact的。合并之后的也是合并了很多的字节，在这里是不断的增加indx指针来实现对compact的数据的读取的！
-
-
-
-这里看不出合并后的数据怎么读取的，需要结合compact的代码！
-
-```
-/**
- * Merges data points for the same HBase row into the local object.
- * When executing multiple async queries simultaneously, they may call into 
- * this method with data sets that are out of order. This may ONLY be called 
- * after setRow() has initiated the rowseq. It also allows for rows with 
- * different salt bucket IDs to be merged into the same sequence.
- * @param row The compacted HBase row to merge into this instance.
- * @throws IllegalStateException if {@link #setRow} wasn't called first.
- * @throws IllegalArgumentException if the data points in the argument
- * do not belong to the same row as this RowSeq
- */
-@Override
-public void addRow(final KeyValue row) {
-  if (this.key == null) {
-    throw new IllegalStateException("setRow was never called on " + this);
-  }
-
-  final byte[] key = row.key();
-  if (Bytes.memcmp(this.key, key, Const.SALT_WIDTH(), 
-      key.length - Const.SALT_WIDTH()) != 0) {
-    throw new IllegalDataException("Attempt to add a different row="
-        + row + ", this=" + this);
-  }
-
-  final byte[] remote_qual = row.qualifier();
-  final byte[] remote_val = row.value();
-  final byte[] merged_qualifiers = new byte[qualifiers.length + remote_qual.length];
-  final byte[] merged_values = new byte[values.length + remote_val.length]; 
-
-  int remote_q_index = 0;
-  int local_q_index = 0;
-  int merged_q_index = 0;
-  
-  int remote_v_index = 0;
-  int local_v_index = 0;
-  int merged_v_index = 0;
-  short v_length;
-  short q_length;
-  while (remote_q_index < remote_qual.length || 
-      local_q_index < qualifiers.length) {
-    // if the remote q has finished, we just need to handle left over locals
-    if (remote_q_index >= remote_qual.length) {
-      v_length = Internal.getValueLengthFromQualifier(qualifiers, 
-          local_q_index);
-      System.arraycopy(values, local_v_index, merged_values, 
-          merged_v_index, v_length);
-      local_v_index += v_length;
-      merged_v_index += v_length;
-      
-      q_length = Internal.getQualifierLength(qualifiers, 
-          local_q_index);
-      System.arraycopy(qualifiers, local_q_index, merged_qualifiers, 
-          merged_q_index, q_length);
-      local_q_index += q_length;
-      merged_q_index += q_length;
-      
-      continue;
-    }
-    
-    // if the local q has finished, we need to handle the left over remotes
-    if (local_q_index >= qualifiers.length) {
-      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
-          remote_q_index);
-      System.arraycopy(remote_val, remote_v_index, merged_values, 
-          merged_v_index, v_length);
-      remote_v_index += v_length;
-      merged_v_index += v_length;
-      
-      q_length = Internal.getQualifierLength(remote_qual, 
-          remote_q_index);
-      System.arraycopy(remote_qual, remote_q_index, merged_qualifiers, 
-          merged_q_index, q_length);
-      remote_q_index += q_length;
-      merged_q_index += q_length;
-      
-      continue;
-    }
-    
-    // for dupes, we just need to skip and continue
-    // 有重复的
-    final int sort = Internal.compareQualifiers(remote_qual, remote_q_index, 
-        qualifiers, local_q_index);
-    if (sort == 0) {
-      //LOG.debug("Discarding duplicate timestamp: " + 
-      //    Internal.getOffsetFromQualifier(remote_qual, remote_q_index));
-      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
-          remote_q_index);
-      remote_v_index += v_length;
-      q_length = Internal.getQualifierLength(remote_qual, 
-          remote_q_index);
-      remote_q_index += q_length;
-      continue;
-    }
-    
-    if (sort < 0) {
-      v_length = Internal.getValueLengthFromQualifier(remote_qual, 
-          remote_q_index);
-      System.arraycopy(remote_val, remote_v_index, merged_values, 
-          merged_v_index, v_length);
-      remote_v_index += v_length;
-      merged_v_index += v_length;
-      
-      q_length = Internal.getQualifierLength(remote_qual, 
-          remote_q_index);
-      System.arraycopy(remote_qual, remote_q_index, merged_qualifiers, 
-          merged_q_index, q_length);
-      remote_q_index += q_length;
-      merged_q_index += q_length;
-    } else {
-      v_length = Internal.getValueLengthFromQualifier(qualifiers, 
-          local_q_index);
-      System.arraycopy(values, local_v_index, merged_values, 
-          merged_v_index, v_length);
-      local_v_index += v_length;
-      merged_v_index += v_length;
-      
-      q_length = Internal.getQualifierLength(qualifiers, 
-          local_q_index);
-      System.arraycopy(qualifiers, local_q_index, merged_qualifiers, 
-          merged_q_index, q_length);
-      local_q_index += q_length;
-      merged_q_index += q_length;
-    }
-  }
-  
-  // we may have skipped some columns if we were given duplicates. Since we
-  // had allocated enough bytes to hold the incoming row, we need to shrink
-  // the final results
-  if (merged_q_index == merged_qualifiers.length) {
-    qualifiers = merged_qualifiers;
-  } else {
-    qualifiers = Arrays.copyOfRange(merged_qualifiers, 0, merged_q_index);
-  }
-  
-  // set the meta bit based on the local and remote metas
-  //这里这段话很重要，因为每个Cell有可能是秒的，也有可能是毫秒的，还有可能是合并以后的，所以就得标记
-  //如果是合并以后的数据的读取，其实上面的遍历那么已经做了
-  byte meta = 0;
-  if ((values[values.length - 1] & Const.MS_MIXED_COMPACT) == 
-                                   Const.MS_MIXED_COMPACT || 
-      (remote_val[remote_val.length - 1] & Const.MS_MIXED_COMPACT) == 
-                                           Const.MS_MIXED_COMPACT) {
-    meta = Const.MS_MIXED_COMPACT;
-  }
-  //注意这里：有一个+1操作，专门用来存放标志位的。
-  values = Arrays.copyOfRange(merged_values, 0, merged_v_index + 1);
-  values[values.length - 1] = meta;
-}
-```
-
-前面的SetRow和AddRow是RowSeq写的过程。
-
-既然RowSeq实现了DataPoints接口，那么我们看看他是怎么遍历数据以及获取数据值的：
-
-
-
-- 对应的度量和标签（此处仅仅列出度量）
-
-RowSeq对应的是一个rowkey的整行数据了，所以，这里会对应一个metrics；注意，加载的时候tsdb会缓存这些信息的，缓存的地方是tsdb这个实例；
-
-```
-public String metricName() {
-  try {
-    return metricNameAsync().joinUninterruptibly();
-  } catch (RuntimeException e) {
-    throw e;
-  } catch (Exception e) {
-    throw new RuntimeException("Should never be here", e);
-  }
-}
-```
-
-
-
-- 获取大小；
-
-  这个函数很重要，可以理解数据的组成。MIX类型的，需要遍历，秒或者毫秒类型的，常量时间；所以我们写数据的时候尽量以一种类型去写！
-
-```
-public int size() {
-  // if we don't have a mix of second and millisecond qualifiers we can run
-  // this in O(1), otherwise we have to run O(n)
-  if ((values[values.length - 1] & Const.MS_MIXED_COMPACT) == 
-    Const.MS_MIXED_COMPACT) {
-    int size = 0;
-    for (int i = 0; i < qualifiers.length; i += 2) {
-      if ((qualifiers[i] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
-        i += 2;
-      }
-      size++;
-    }
-    return size;
-  } else if ((qualifiers[0] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
-    return qualifiers.length / 4;
-  } else {
-    return qualifiers.length / 2;
-  }
-}
-```
-
-
-
-- 遍历数据：
-
-根据qual_index和value_index作为指针，不断向后移动，同时解析数据。数据的长度存放在qualifier里，同时移动value_index
-
-```
-public boolean hasNext() {
-  return qual_index < qualifiers.length;
-}
-
-public DataPoint next() {
-  if (!hasNext()) {
-    throw new NoSuchElementException("no more elements");
-  }
-  
-  if (Internal.inMilliseconds(qualifiers[qual_index])) {
-    qualifier = Bytes.getInt(qualifiers, qual_index);
-    qual_index += 4;
-  } else {
-    qualifier = Bytes.getUnsignedShort(qualifiers, qual_index);
-    qual_index += 2;
-  }
-  final byte flags = (byte) qualifier;
-  value_index += (flags & Const.LENGTH_MASK) + 1;
-  //LOG.debug("next -> now=" + toStringSummary());
-  return this;
-}
-```
-
-
-
-- Seek到指定的时间戳：和next是一样的逻辑，多了个循环；
-
-```
-public void seek(final long timestamp) {
-  if ((timestamp & Const.MILLISECOND_MASK) != 0) {  // negative or not 48 bits
-    throw new IllegalArgumentException("invalid timestamp: " + timestamp);
-  }
-  qual_index = 0;
-  value_index = 0;
-  final int len = qualifiers.length;
-  //LOG.debug("Peeking timestamp: " + (peekNextTimestamp() < timestamp));
-  while (qual_index < len && peekNextTimestamp() < timestamp) {
-    //LOG.debug("Moving to next timestamp: " + peekNextTimestamp());
-    if (Internal.inMilliseconds(qualifiers[qual_index])) {
-      qualifier = Bytes.getInt(qualifiers, qual_index);
-      qual_index += 4;
-    } else {
-      qualifier = Bytes.getUnsignedShort(qualifiers, qual_index);
-      qual_index += 2;
-    }
-    final byte flags = (byte) qualifier;
-    value_index += (flags & Const.LENGTH_MASK) + 1;
-  }
-  //LOG.debug("seek to " + timestamp + " -> now=" + toStringSummary());
-}
-```
-
-
-
-- 当前数据的时间戳获取：
-
-```
-public long timestamp() {
-  assert qual_index > 0: "not initialized: " + this;
-  if ((qualifier & Const.MS_FLAG) == Const.MS_FLAG) {
-    final long ms = (qualifier & 0x0FFFFFC0) >>> (Const.MS_FLAG_BITS);
-    return (base_time * 1000) + ms;            
-  } else {
-    final long seconds = (qualifier & 0xFFFF) >>> Const.FLAG_BITS;
-    return (base_time + seconds) * 1000;
-  }
-}
-```
-
-- 获取值：
-
-  注意：Long或者Float是与FLAG_FLOAT&，FLAG_FLOAT=0x8，就是第四个Bit表示Long或者Float；
-
-```
-public boolean isInteger() {
-  assert qual_index > 0: "not initialized: " + this;
-  return (qualifier & Const.FLAG_FLOAT) == 0x0;
-}
-
-public long longValue() {
-  if (!isInteger()) {
-    throw new ClassCastException("value @"
-      + qual_index + " is not a long in " + this);
-  }
-  final byte flags = (byte) qualifier;
-  final byte vlen = (byte) ((flags & Const.LENGTH_MASK) + 1);
-  return extractIntegerValue(values, value_index - vlen, flags);
-}
-
-public double doubleValue() {
-  if (isInteger()) {
-    throw new ClassCastException("value @"
-      + qual_index + " is not a float in " + this);
-  }
-  final byte flags = (byte) qualifier;
-  final byte vlen = (byte) ((flags & Const.LENGTH_MASK) + 1);
-  return extractFloatingPointValue(values, value_index - vlen, flags);
-}
-```
-
-##### Span
 
 #### Span的查找
 
