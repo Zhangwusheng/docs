@@ -2407,6 +2407,28 @@ final class Iterator implements SeekableView {
   }
 
 }
+
+private int seekRow(final long timestamp) {
+    checkRowOrder();
+    int row_index = 0;
+    iRowSeq row = null;
+    final int nrows = rows.size();
+    for (int i = 0; i < nrows; i++) {
+      row = rows.get(i);
+      final int sz = row.size();
+      if (sz < 1) {
+        row_index++;
+      } else if (row.timestamp(sz - 1) < timestamp) {
+        row_index++;  // The last DP in this row is before 'timestamp'.
+      } else {
+        break;
+      }
+    }
+    if (row_index == nrows) {  // If this timestamp was too large for the
+      --row_index;             // last row, return the last row.
+    }
+    return row_index;
+  }
 ```
 
 上面的移动很简单，就是记住当前rowseq，如果当前row遍历完了，就移动到下一个rowseq。
@@ -2655,11 +2677,137 @@ private void computeTags() {
 
 ```
 
-这里遍历所有的Span的RowKey取出来的tags，如果出现了tagk相同，但是tagv不相同的，那么就把这些tagk认为是被聚合掉的，这里正好印证了SpanGroup的作用：就是查询里需要汇总的相同维度的Span会放到一个SpanGroup里面去！哈哈
+这里遍历所有的Span的RowKey取出来的tags，如果出现了tagk相同，但是tagv不相同的，那么就把这些tagk认为是被聚合掉的，这里正好印证了SpanGroup的作用：就是查询里需要汇总的相同维度的Span会放到一个SpanGroup里面去！不同的维度当然就是被汇总掉的维度，哈哈。正好也验证了百度的数据，city和zip_code是一一对应的，但是如果我们只按照city汇总，但是zip_code也会出现在汇总维度里面！因为他都是一样的。
 
 这样如果一个tagk出现了多个值，一定是属于被聚合掉的！
 
 
+
+- 读取数据：
+
+```
+public SeekableView iterator() {
+  return AggregationIterator.create(spans, start_time, end_time, aggregator,
+                                aggregator.interpolationMethod(),
+                                downsampler, query_start, query_end,
+                                rate, rate_options, rollup_query);
+}
+```
+
+为什么叫AggregationIterator？猜想是因为这里要完成聚合的操作。
+
+```
+public static AggregationIterator create(final List<Span> spans,
+    final long start_time,
+    final long end_time,
+    final Aggregator aggregator,
+    final Interpolation method,
+    final DownsamplingSpecification downsampler,
+    final long query_start,
+    final long query_end,
+    final boolean rate,
+    final RateOptions rate_options,
+    final RollupQuery rollup_query) {
+  final int size = spans.size();
+  final SeekableView[] iterators = new SeekableView[size];
+  for (int i = 0; i < size; i++) {
+    SeekableView it;
+    if (downsampler == null || 
+        downsampler == DownsamplingSpecification.NO_DOWNSAMPLER) {
+      it = spans.get(i).spanIterator();
+    } else {
+      it = spans.get(i).downsampler(start_time, end_time, downsampler, 
+          query_start, query_end, rollup_query);
+    }
+    if (rate) {
+      it = new RateSpan(it, rate_options);
+    }
+    iterators[i] = it;
+  }
+  return new AggregationIterator(iterators, start_time, end_time, aggregator,
+      method, rate);  
+}
+```
+
+上面代码有个逻辑：如果不需要降采样，很显然，我们就应该去遍历每一个Span，然后Span在遍历每个RowSeq，所以地17行就是这么处理的，直接返回spanIterator();如果需要降采样，很显然，应该是把Span里面的数据按照interval进行汇总之后，再把数据返回来；注意，这里是根据Span进行降采样，很显然，还没有进行查询里面要求的汇总。
+
+上述代码中，先把每个Span的逻辑iterator计算出来，然后把所有的iterator汇总起来，所以叫AggregationIterator！
+
+看他的注释也是这个意思：
+
+> *Creates an aggregation iterator for a group of data point iterators.*
+
+那么我们就看看他的构造函数和next是怎么处理的：
+
+这里缩小了时间范围，精确的匹配了查询的时间对应的数据点！
+
+```
+public AggregationIterator(final SeekableView[] iterators,
+                            final long start_time,
+                            final long end_time,
+                            final Aggregator aggregator,
+                            final Interpolation method,
+                            final boolean rate) {
+  .....成员变量赋值......
+  final int size = iterators.length;
+  timestamps = new long[size * 2];
+  values = new long[size * 2];
+  // Initialize every Iterator, fetch their first values that fall
+  // within our time range.
+  int num_empty_spans = 0;
+  for (int i = 0; i < size; i++) {
+    SeekableView it = iterators[i];
+    it.seek(start_time);
+    DataPoint dp;
+    if (!it.hasNext()) {
+      ++num_empty_spans;
+      endReached(i);
+      continue;
+    }
+    dp = it.next();
+ 
+    if (dp.timestamp() >= start_time) {
+      //如果数据点匹配查询要求的时间点，保存起来
+      putDataPoint(size + i, dp);
+    } else {
+      //这里的条件是什么？
+      // if there is data, advance to the start time if applicable.
+      while (dp != null && dp.timestamp() < start_time) {
+        if (it.hasNext()) {
+          dp = it.next();
+        } else {
+          dp = null;
+        }
+      }
+      if (dp == null) {
+        if (LOG.isDebugEnabled()) {
+          LOG.debug(String.format("No DP in range for #%d: start time %d", i,
+                                  start_time));
+        }
+        endReached(i);
+        continue;
+      }
+      putDataPoint(size + i, dp);
+    }
+    if (rate) {
+      // The first rate against the time zero should be populated
+      // for the backward compatibility that uses the previous rate
+      // instead of interpolating for aggregation when a data point is
+      // missing for the current timestamp.
+      // TODO: Use the next rate that contains the current timestamp.
+      if (it.hasNext()) {
+        moveToNext(i);
+      } else {
+        endReached(i);
+      }
+    }
+  }
+  if (num_empty_spans > 0) {
+    LOG.debug(String.format("%d out of %d spans are empty!",
+                            num_empty_spans, size));
+  }
+}
+```
 
 ## 代码执行顺序：
 
