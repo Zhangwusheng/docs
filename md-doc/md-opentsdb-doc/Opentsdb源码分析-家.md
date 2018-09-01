@@ -1,5 +1,9 @@
 # 1.写流程
 
+Salt的处理：
+
+1.分成固定的20个桶：
+
 
 
 # 2.Qualifer的相关操作：
@@ -1744,7 +1748,7 @@ public interface iRowSeq extends DataPoints {
 }
 ```
 
-- 比较器：
+##### 比较器RowSeqComparator：
 
 RowSeq代表的是规整到一个小时的数据，所以只要比较BaseTime（小时就够了），这里也隐含了一个条件，就是能够进行比较的RowSeq一定是其他维度相同的！这个在后面的Span实现是挂钩的，因为Span就是相同的时间线来排序的，同一个Span里面，放的是不同的RowSeq，ROwSeq里面放的是相同的RowKey里面按照Qualifer排序的数据！
 
@@ -2219,6 +2223,46 @@ public class Span implements DataPoints {
 
 Span就是一系列的RowSeq，可以理解为多行数据。但是要求时间线必须相同。
 
+##### SpanCmp
+
+> net.opentsdb.core.TsdbQuery.SpanCmp
+
+可以看出来，这就是在比较时间线
+
+```
+private static final class SpanCmp implements Comparator<byte[]> {
+
+  private final short metric_width;
+
+  public SpanCmp(final short metric_width) {
+    this.metric_width = metric_width;
+  }
+
+  @Override
+  public int compare(final byte[] a, final byte[] b) {
+    final int length = Math.min(a.length, b.length);
+    if (a == b) {  // Do this after accessing a.length and b.length
+      return 0;    // in order to NPE if either a or b is null.
+    }
+    int i;
+    // First compare the metric ID.
+    for (i = 0; i < metric_width; i++) {
+      if (a[i] != b[i]) {
+        return (a[i] & 0xFF) - (b[i] & 0xFF);  // "promote" to unsigned.
+      }
+    }
+    // Then skip the timestamp and compare the rest.
+    for (i += Const.TIMESTAMP_BYTES; i < length; i++) {
+      if (a[i] != b[i]) {
+        return (a[i] & 0xFF) - (b[i] & 0xFF);  // "promote" to unsigned.
+      }
+    }
+    return a.length - b.length;
+  }
+
+}
+```
+
 从下面的函数中可以看出：
 
 - Span写：
@@ -2502,7 +2546,7 @@ public ByteMap<byte[]> getTagUids() {
 
 Span把相同时间线的不同小时的数据，都组织好了，那么SpanGroup是干什么的呢？
 
-SpanGroup是不是相同时间线的呢？不一定了！（？？？）
+SpanGroup代表了不同的时间线的数据！
 
 主要的目的是针对查询提供的汇总维度进行数据组织！这里就减少了汇总的维度；Span可以理解为按照时间线通过降采样进行GroupBy统计，SpanGroup可以理解为减少时间线里面的维度，将数据按照减少后的维度进行GroupBy统计。
 
@@ -2683,9 +2727,9 @@ private void computeTags() {
 
 
 
-- 读取数据：
+##### 读取数据：
 
-```
+```java
 public SeekableView iterator() {
   return AggregationIterator.create(spans, start_time, end_time, aggregator,
                                 aggregator.interpolationMethod(),
@@ -2694,7 +2738,7 @@ public SeekableView iterator() {
 }
 ```
 
-为什么叫AggregationIterator？猜想是因为这里要完成聚合的操作。
+
 
 ```
 public static AggregationIterator create(final List<Span> spans,
@@ -2731,6 +2775,108 @@ public static AggregationIterator create(final List<Span> spans,
 
 上面代码有个逻辑：如果不需要降采样，很显然，我们就应该去遍历每一个Span，然后Span在遍历每个RowSeq，所以地17行就是这么处理的，直接返回spanIterator();如果需要降采样，很显然，应该是把Span里面的数据按照interval进行汇总之后，再把数据返回来；注意，这里是根据Span进行降采样，很显然，还没有进行查询里面要求的汇总。
 
+##### AggregationIterator
+
+```
+/**
+ * Iterator that aggregates multiple spans or time series data and does linear
+ * interpolation (lerp) for missing data points.
+ 聚合多个span或者时间线数据的迭代器，对缺失的数据进行插值操作。
+ * <p>
+ * This where the real business of {@link SpanGroup} is.  This iterator
+ * provides a merged, aggregated view of multiple {@link Span}s.  The data
+ * points in all the Spans are returned in chronological order.  Each time
+ * we return a data point from a span, we aggregate it with the current
+ * value from all the other Spans.  If other Spans don't have a value at
+ * that specific timestamp, we do a linear interpolation in order to
+ * estimate what the value of that Span should be at that time.
+ 这个迭代器为多个spans提供了一个合并、聚合的视图；所有的span里面的数据是按照时间排序的(chronological：按时间的前后顺序排列的; 编年的;)。当我们从span返回一个数据点时
+ * <p>
+ * All this merging, linear interpolation and aggregation happens in
+ * {@code O(1)} space and {@code O(N)} time.  All we need is to keep an
+ * iterator on each Span, and {@code 4*k} {@code long}s in memory, where
+ * {@code k} is the number of Spans in the group.  When computing a rate,
+ * we need an extra {@code 2*k} {@code long}s in memory (see below).
+ * <p>
+ * In order to do linear interpolation, we need to know two data points:
+ * the current one and the next one.  So for each Span in the group, we need
+ * 4 longs: the current value, the current timestamp, the next value and the
+ * next timestamp.  We maintain two arrays for timestamps and values.  Those
+ * arrays have {@code 2 * iterators.length} elements.  The first half
+ * contains the current values and second half the next values.  When a Span
+ * gets used, its next data point becomes the current one (so its value and
+ * timestamp are moved from the 2nd half of their respective array to the
+ * first half) and the new-next data point is fetched from the underlying
+ * iterator of that Span.
+ * <p>
+ * Here is an example when the SpanGroup contains 2 Spans:
+ * <pre>              current    |     next
+ *               +-------+-------+-------+-------+
+ *   timestamps: |  T1   |  T2   |  T3   |  T4   |
+ *               +-------+-------+-------+-------+
+ *                    current    |     next
+ *               +-------+-------+-------+-------+
+ *       values: |  V1   |  V2   |  V3   |  V4   |
+ *               +-------+-------+-------+-------+
+ *                               |
+ *   current: 0
+ *   pos: 0
+ *   iterators: [ it0, it1 ]
+ * </pre>
+ * Since {@code current == 0}, the current data point has the value V1
+ * and time T1.  Let's note that (V1, T1).  Now this group has 2 Spans,
+ * which means we're trying to aggregate 2 different series (same metric ID
+ * but different tags).  So The next value that this iterator returns needs
+ * to be a combination of V1 and V2 (assuming that T2 is less than T1).
+ * If our aggregation function is "sum", we sort of want to sum up V1 and
+ * V2.  But those two data points may not necessarily be at the same time.
+ * T2 can be less than or equal to T1.  If T2 is greater than T1, we ignore
+ * V2 and return just V1, since we haven't reached the time yet where V2
+ * exist, so it's essentially as if it wasn't there.
+ * Say T2 is less than T1.  Summing up V1 and V2 doesn't make sense, since
+ * they represent two measurements made at different times.  So instead,
+ * we need to find what the value V2 would have been, had it been measured
+ * at time T1 instead of T2.  We do this using linear interpolation between
+ * the data point (V2, T2) and the following one for that series, (V4, T4).
+ * The result is thus the sum of V1 and the interpolated value between V2
+ * and V4.
+ * <p>
+ * Now let's move onto the next data point.  Assuming that T3 is less than
+ * T4, it means we need to advance to the next point on the 1st series.  To
+ * do this we use the iterator it0 to get the next data point for that
+ * series and we end up with the following state:
+ * <pre>              current    |     next
+ *               +-------+-------+-------+-------+
+ *   timestamps: |  T3   |  T2   |  T5   |  T4   |
+ *               +-------+-------+-------+-------+
+ *                    current    |     next
+ *               +-------+-------+-------+-------+
+ *       values: |  V3   |  V2   |  V5   |  V4   |
+ *               +-------+-------+-------+-------+
+ *                               |
+ *   current: 0
+ *   pos: 0
+ *   iterators: [ it0, it1 ]
+ * </pre>
+ * Then all you need is to "rinse(冲洗，漂洗) and repeat".
+ * <p>
+ * More details: Since each value above can be either an integer or a
+ * floating point, we have to keep track of the type of each value.  Values
+ * are always stored in a {@code long}.  When a value is a floating point
+ * value, the bits of the longs just need to be interpreted to get back the
+ * floating point value.  The way we keep track of the type is by using the
+ * most significant bit of the timestamp (to avoid an extra array).  This is
+ * fine since our timestamps only really use 32 of the 64 bits of the long
+ * in which they're stored.  When there is no "current" value (1st half of
+ * the arrays depicted(描绘) above), the timestamp will be set to 0.  When there
+ * is no "next" value (2nd half of the arrays), the timestamp will be set
+ * to a special, really large value (too large to be a valid timestamp).
+ * <p>
+ */
+```
+
+
+
 上述代码中，先把每个Span的逻辑iterator计算出来，然后把所有的iterator汇总起来，所以叫AggregationIterator！
 
 看他的注释也是这个意思：
@@ -2739,7 +2885,7 @@ public static AggregationIterator create(final List<Span> spans,
 
 那么我们就看看他的构造函数和next是怎么处理的：
 
-这里缩小了时间范围，精确的匹配了查询的时间对应的数据点！
+这里缩小了时间范围，精确的匹配了查询的时间对应的数据点！这里的算法比较复杂，稍后分析。
 
 ```
 public AggregationIterator(final SeekableView[] iterators,
@@ -2808,6 +2954,305 @@ public AggregationIterator(final SeekableView[] iterators,
   }
 }
 ```
+
+
+
+```
+public boolean hasNext() {
+  final int size = iterators.length;
+  for (int i = 0; i < size; i++) {
+    // As long as any of the iterators has a data point with a timestamp
+    // that falls within our interval, we know we have at least one next.
+    if ((timestamps[size + i] & TIME_MASK) <= end_time) {
+      //LOG.debug("hasNext #" + (size + i));
+      return true;
+    }
+  }
+  //LOG.debug("No hasNext (return false)");
+  return false;
+}
+
+public DataPoint next() {
+  final int size = iterators.length;
+  long min_ts = Long.MAX_VALUE;
+
+  // In case we reached the end of one or more Spans, we need to make sure
+  // we mark them as such by zeroing their current timestamp.  There may
+  // be multiple Spans that reached their end at once, so check them all.
+  for (int i = current; i < size; i++) {
+    if (timestamps[i + size] == TIME_MASK) {
+      //LOG.debug("Expiring last DP for #" + current);
+      timestamps[i] = 0;
+    }
+  }
+
+  // Now we need to find which Span we'll consume next.  We'll pick the
+  // one that has the data point with the smallest timestamp since we want to
+  // return them in chronological order.
+  current = -1;
+  // If there's more than one Span with the same smallest timestamp, we'll
+  // set this to true so we can fetch the next data point in all of them at
+  // the same time.
+  boolean multiple = false;
+  for (int i = 0; i < size; i++) {
+    final long timestamp = timestamps[size + i] & TIME_MASK;
+    if (timestamp <= end_time) {
+      if (timestamp < min_ts) {
+        min_ts = timestamp;
+        current = i;
+        // We just found a new minimum so right now we can't possibly have
+        // multiple Spans with the same minimum.
+        multiple = false;
+      } else if (timestamp == min_ts) {
+        multiple = true;
+      }
+    }
+  }
+  if (current < 0) {
+    throw new NoSuchElementException("no more elements");
+  }
+  moveToNext(current);
+  if (multiple) {
+    //LOG.debug("Moving multiple DPs at time " + min_ts);
+    // We know we saw at least one other data point with the same minimum
+    // timestamp after `current', so let's move those ones too.
+    for (int i = current + 1; i < size; i++) {
+      final long timestamp = timestamps[size + i] & TIME_MASK;
+      if (timestamp == min_ts) {
+        moveToNext(i);
+      }
+    }
+  }
+
+  return this;
+}
+
+/**
+ * Makes iterator number {@code i} move forward to the next data point.
+ * @param i The index in {@link #iterators} of the iterator.
+ */
+private void moveToNext(final int i) {
+  final int next = iterators.length + i;
+  timestamps[i] = timestamps[next];
+  values[i] = values[next];
+  //LOG.debug("Moving #" + next + " -> #" + i
+  //          + ((timestamps[i] & FLAG_FLOAT) == FLAG_FLOAT
+  //             ? " float " + Double.longBitsToDouble(values[i])
+  //             : " long " + values[i])
+  //          + " @ time " + (timestamps[i] & TIME_MASK));
+  final SeekableView it = iterators[i];
+  if (it.hasNext()) {
+    putDataPoint(next, it.next());
+  } else {
+    endReached(i);
+  }
+}
+
+public void remove() {
+  throw new UnsupportedOperationException();
+}
+
+// ---------------------- //
+// SeekableView interface //
+// ---------------------- //
+
+public void seek(final long timestamp) {
+  for (final SeekableView it : iterators) {
+    it.seek(timestamp);
+  }
+}
+
+// ------------------- //
+// DataPoint interface //
+// ------------------- //
+
+public long timestamp() {
+  return timestamps[current] & TIME_MASK;
+}
+
+public boolean isInteger() {
+  if (rate) {
+    // An rate can never be precisely represented without floating point.
+    return false;
+  }
+  // If at least one of the values we're going to aggregate or interpolate
+  // with is a float, we have to convert everything to a float.
+  for (int i = timestamps.length - 1; i >= 0; i--) {
+    if ((timestamps[i] & FLAG_FLOAT) == FLAG_FLOAT) {
+      return false;
+    }
+  }
+  return true;
+}
+
+public long longValue() {
+  if (isInteger()) {
+    pos = -1;
+    return aggregator.runLong(this);
+  }
+  throw new ClassCastException("current value is a double: " + this);
+}
+
+public double doubleValue() {
+  if (!isInteger()) {
+    pos = -1;
+    final double value = aggregator.runDouble(this);
+    //LOG.debug("aggregator returned " + value);
+    if (Double.isInfinite(value)) {
+      throw new IllegalStateException("Got Infinity: "
+         + value + " in this " + this);
+    }
+    return value;
+  }
+  throw new ClassCastException("current value is a long: " + this);
+}
+
+public double toDouble() {
+  return isInteger() ? longValue() : doubleValue();
+}
+
+// -------------------------- //
+// Aggregator.Longs interface //
+// -------------------------- //
+
+public boolean hasNextValue() {
+  return hasNextValue(false);
+}
+
+/**
+ * Returns whether or not there are more values to aggregate.
+ * @param update_pos Whether or not to also move the internal pointer
+ * {@link #pos} to the index of the next value to aggregate.
+ * @return true if there are more values to aggregate, false otherwise.
+ */
+private boolean hasNextValue(boolean update_pos) {
+  final int size = iterators.length;
+  for (int i = pos + 1; i < size; i++) {
+    if (timestamps[i] != 0) {
+      //LOG.debug("hasNextValue -> true #" + i);
+      if (update_pos) {
+        pos = i;
+      }
+      return true;
+    }
+  }
+  //LOG.debug("hasNextValue -> false (ran out)");
+  return false;
+}
+
+public long nextLongValue() {
+  if (hasNextValue(true)) {
+    final long y0 = values[pos];
+    if (rate) {
+      throw new AssertionError("Should not be here, impossible! " + this);
+    }
+    if (current == pos) {
+      return y0;
+    }
+    final long x = timestamps[current] & TIME_MASK;
+    final long x0 = timestamps[pos] & TIME_MASK;
+    if (x == x0) {
+      return y0;
+    }
+    final long y1 = values[pos + iterators.length];
+    final long x1 = timestamps[pos + iterators.length] & TIME_MASK;
+    if (x == x1) {
+      return y1;
+    }
+    if ((x1 & Const.MILLISECOND_MASK) != 0) {
+      throw new AssertionError("x1=" + x1 + " in " + this);
+    }
+    final long r;
+    switch (method) {
+      case LERP:
+        r = y0 + (x - x0) * (y1 - y0) / (x1 - x0);
+        //LOG.debug("Lerping to time " + x + ": " + y0 + " @ " + x0
+        //          + " -> " + y1 + " @ " + x1 + " => " + r);
+        break;
+      case ZIM:
+        r = 0;
+        break;
+      case MAX:
+        r = Long.MAX_VALUE;
+        break;
+      case MIN:
+        r = Long.MIN_VALUE;
+        break;
+      default:
+        throw new IllegalDataException("Invalid interpolation somehow??");
+    }
+    return r;
+  }
+  throw new NoSuchElementException("no more longs in " + this);
+}
+
+// ---------------------------- //
+// Aggregator.Doubles interface //
+// ---------------------------- //
+
+public double nextDoubleValue() {
+  if (hasNextValue(true)) {
+    final double y0 = ((timestamps[pos] & FLAG_FLOAT) == FLAG_FLOAT
+                       ? Double.longBitsToDouble(values[pos])
+                       : values[pos]);
+    if (current == pos) {
+      //LOG.debug("Exact match, no lerp needed");
+      return y0;
+    }
+    if (rate) {
+      // No LERP for the rate. Just uses the rate of any previous timestamp.
+      // If x0 is smaller than the current time stamp 'x', we just use
+      // y0 as a current rate of the 'pos' span. If x0 is bigger than the
+      // current timestamp 'x', we don't go back further and just use y0
+      // instead. It happens only at the beginning of iteration.
+      // TODO: Use the next rate the time range of which includes the current
+      // timestamp 'x'.
+      return y0;
+    }
+    final long x = timestamps[current] & TIME_MASK;
+    final long x0 = timestamps[pos] & TIME_MASK;
+    if (x == x0) {
+      //LOG.debug("No lerp needed x == x0 (" + x + " == "+x0+") => " + y0);
+      return y0;
+    }
+    final int next = pos + iterators.length;
+    final double y1 = ((timestamps[next] & FLAG_FLOAT) == FLAG_FLOAT
+                       ? Double.longBitsToDouble(values[next])
+                       : values[next]);
+    final long x1 = timestamps[next] & TIME_MASK;
+    if (x == x1) {
+      //LOG.debug("No lerp needed x == x1 (" + x + " == "+x1+") => " + y1);
+      return y1;
+    }
+    if ((x1 & Const.MILLISECOND_MASK) != 0) {
+      throw new AssertionError("x1=" + x1 + " in " + this);
+    }
+    final double r;
+    switch (method) {
+    case LERP:
+      r = y0 + (x - x0) * (y1 - y0) / (x1 - x0);
+      //LOG.debug("Lerping to time " + x + ": " + y0 + " @ " + x0
+      //          + " -> " + y1 + " @ " + x1 + " => " + r);
+      break;
+    case ZIM:
+      r = 0;
+      break;
+    case MAX:
+      r = Double.MAX_VALUE;
+      break;
+    case MIN:
+      r = Double.MIN_VALUE;
+      break;
+    default:
+      throw new IllegalDataException("Invalid interploation somehow??");
+  }
+    return r;
+  }
+  throw new NoSuchElementException("no more doubles in " + this);
+}
+```
+
+
 
 ## 代码执行顺序：
 
@@ -3334,11 +3779,127 @@ public Deferred<DataPoints[]> runAsync() throws HBaseException {
 
 3.因为参与查询要求的GroupBy的维度一定是时间线的维度的一个子集，因此将Span按照查询的要求进行GroupBy的维度再进行一次汇总，每个分组称为SpanGroup
 
-4.降采样处理逻辑？数据过滤处理逻辑？汇总处理逻辑？
+4.降采样处理逻辑是在Span里面做的
+
+5.数据过滤处理逻辑？
+
+6.汇总处理逻辑？
 
 5.数据不保存计算结果，而是采用了懒加载的方式，在用到时才进行计算。这是通过各种iterator来实现的，而每个iterator都实现了datapoint接口，datapoint结果包含数据最基本的元素：时间戳，值。
 
 
+
+#### 数据的加载
+
+
+
+##### Salt的计算：
+
+Salt Width最大为8个字节，可配置。
+
+```
+static void setSaltWidth(final int width) {
+  if (width < 0 || width > 8) {
+    throw new IllegalArgumentException("Salt width must be between 0 and 8");
+  }
+  SALT_WIDTH = width;
+}
+```
+
+根据时间线计算Hash，模上 SALT_BUCKETS就是应该落到哪个桶，假设为i，根据i进行一系列的唯一运算，得到结果。
+
+```java
+private static int SALT_BUCKETS = 20;
+```
+
+```
+
+public static void prefixKeyWithSalt(final byte[] row_key) {
+  if (Const.SALT_WIDTH() > 0) {
+    if (row_key.length < (Const.SALT_WIDTH() + TSDB.metrics_width()) || 
+      (Bytes.memcmp(row_key, new byte[Const.SALT_WIDTH() + TSDB.metrics_width()], 
+          Const.SALT_WIDTH(), TSDB.metrics_width()) == 0)) {
+      // ^ Don't salt the global annotation row, leave it at zero
+      return;
+    }
+    final int tags_start = Const.SALT_WIDTH() + TSDB.metrics_width() + 
+        Const.TIMESTAMP_BYTES;
+    
+    // we want the metric and tags, not the timestamp
+    final byte[] salt_base = 
+        new byte[row_key.length - Const.SALT_WIDTH() - Const.TIMESTAMP_BYTES];
+    System.arraycopy(row_key, Const.SALT_WIDTH(), salt_base, 0, TSDB.metrics_width());
+    System.arraycopy(row_key, tags_start,salt_base, TSDB.metrics_width(), 
+        row_key.length - tags_start);
+    int modulo = Arrays.hashCode(salt_base) % Const.SALT_BUCKETS();
+    if (modulo < 0) {
+      // make sure we return a positive salt.
+      modulo = modulo * -1;
+    }
+  
+    final byte[] salt = getSaltBytes(modulo);
+    System.arraycopy(salt, 0, row_key, 0, Const.SALT_WIDTH());
+  } // else salting is disabled so it's a no-op
+}
+
+  public static byte[] getSaltBytes(final int bucket) {
+    final byte[] bytes = new byte[Const.SALT_WIDTH()];
+    int shift = 0;
+    for (int i = 1;i <= Const.SALT_WIDTH(); i++) {
+      bytes[Const.SALT_WIDTH() - i] = (byte) (bucket >>> shift);
+      shift += 8;
+    }
+    return bytes;
+  }
+```
+
+
+
+##### 生成Scanner
+
+```
+public static Scanner getMetricScanner(final TSDB tsdb, final int salt_bucket, 
+    final byte[] metric, final int start, final int stop, 
+    final byte[] table, final byte[] family) {
+  final short metric_width = TSDB.metrics_width();
+  final int metric_salt_width = metric_width + Const.SALT_WIDTH();
+  final byte[] start_row = new byte[metric_salt_width + Const.TIMESTAMP_BYTES];
+  final byte[] end_row = new byte[metric_salt_width + Const.TIMESTAMP_BYTES];
+  
+  if (Const.SALT_WIDTH() > 0) {
+    final byte[] salt = RowKey.getSaltBytes(salt_bucket);
+    System.arraycopy(salt, 0, start_row, 0, Const.SALT_WIDTH());
+    System.arraycopy(salt, 0, end_row, 0, Const.SALT_WIDTH());
+  }
+  
+  Bytes.setInt(start_row, start, metric_salt_width);
+  Bytes.setInt(end_row, stop, metric_salt_width);
+  
+  System.arraycopy(metric, 0, start_row, Const.SALT_WIDTH(), metric_width);
+  System.arraycopy(metric, 0, end_row, Const.SALT_WIDTH(), metric_width);
+  
+  final Scanner scanner = tsdb.getClient().newScanner(table);
+  scanner.setMaxNumRows(tsdb.getConfig().scanner_maxNumRows());
+  scanner.setStartKey(start_row);
+  scanner.setStopKey(end_row);
+  scanner.setFamily(family);
+  return scanner;
+}
+```
+
+这里是生成Scanner的最基本步骤：
+
+1.设置salt 前缀值 ,if salt enabled
+
+2.设置metrics 值
+
+3.根据开始时间和结束时间设置扫描startKey和stopKey
+
+4.设置cf（固定值 t ）
+
+##### 设置Scanner过滤器：
+
+- TSUID的过滤设置
 
 #### Span的查找
 
