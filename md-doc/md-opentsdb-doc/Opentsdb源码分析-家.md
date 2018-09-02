@@ -1,10 +1,439 @@
 # 1.写流程
 
-Salt的处理：
+## 请求的解析
 
-1.分成固定的20个桶：
+> net.opentsdb.tsd.PutDataPointRpc
+>
+> execute(net.opentsdb.core.TSDB, net.opentsdb.tsd.HttpQuery)
+
+```
+public void execute(final TSDB tsdb, final HttpQuery query) 
+  throws IOException {
+
+ // only accept POST
+  .....
+  final List<IncomingDataPoint> dps;
+  try {
+    dps = query.serializer()
+        .parsePutV1(IncomingDataPoint.class, HttpJsonSerializer.TR_INCOMING);
+  } catch (BadRequestException e) {
+    illegal_arguments.incrementAndGet();
+    throw e;
+  }
+  processDataPoint(tsdb, query, dps);
+}
+```
+
+```
+public <T extends IncomingDataPoint> void processDataPoint(final TSDB tsdb, 
+    final HttpQuery query, final List<T> dps) {
+  .....
+  
+  final List<Deferred<Boolean>> deferreds = synchronous ? 
+      new ArrayList<Deferred<Boolean>>(dps.size()) : null;
+  ...一系列操作,不同的分支，我们这里仅仅研究最普通的数据上传...
+  
+   
+       deferred = tsdb.addPoint(dp.getMetric(), dp.getTimestamp(),
+                Tags.parseLong(dp.getValue()), dp.getTags())
+                .addCallback(new SuccessCB())
+                .addErrback(new PutErrback());
+  }
+```
+## RowKey的生成
+
+ addPoint：这里注意一下flags
+
+long类型的flags：序列化为bytes数组的长度减一
+Double是
+  final short flags = Const.FLAG_FLOAT | 0x7;  // A float stored on 8 bytes.
+
+```
+public Deferred<Object> addPoint(final String metric,
+                                 final long timestamp,
+                                 final long value,
+                                 final Map<String, String> tags) {
+  final byte[] v;
+  if (Byte.MIN_VALUE <= value && value <= Byte.MAX_VALUE) {
+    v = new byte[] { (byte) value };
+  } else if (Short.MIN_VALUE <= value && value <= Short.MAX_VALUE) {
+    v = Bytes.fromShort((short) value);
+  } else if (Integer.MIN_VALUE <= value && value <= Integer.MAX_VALUE) {
+    v = Bytes.fromInt((int) value);
+  } else {
+    v = Bytes.fromLong(value);
+  }
+
+  final short flags = (short) (v.length - 1);  // Just the length.
+  return addPointInternal(metric, timestamp, v, tags, flags);
+}
+```
+
+addPointInternal：
+
+1.生成rowkey
+
+2.生成Qualifier
+
+3.调用写入数据库函数
+
+4.float类型的数值，会通过如下变为int类型的表示：
+
+​	Bytes.fromInt(Float.floatToRawIntBits(value))
+
+```
+final Deferred<Object> addPointInternal(final String metric,
+    final long timestamp,
+    final byte[] value,
+    final Map<String, String> tags,
+    final short flags) {
+
+  checkTimestampAndTags(metric, timestamp, value, tags, flags);
+  final byte[] row = IncomingDataPoints.rowKeyTemplate(this, metric, tags);
+  
+  final byte[] qualifier = Internal.buildQualifier(timestamp, flags);
+
+  return storeIntoDB(metric, timestamp, value, tags, flags, row, qualifier);
+}
+```
+
+net.opentsdb.core.IncomingDataPoints#rowKeyTemplate
+
+这里很简单：
+
+1.跳过如果有SALT，则跳过SALT的位置
+
+2.把metric的uid拷贝进去
+
+3.跳过TIMESTAMP_BYTES
+
+4.把所有的tagk/tagv对copy进去
+
+5.如果metric和tagk/tagv对应的UID没有，那么创建
+
+6.注意在tags.resolveAllInternal的最后一行:把所有的tagk的uid进行了二进制排序！
+
+```
+static byte[] rowKeyTemplate(final TSDB tsdb, final String metric,
+    final Map<String, String> tags) {
+  final short metric_width = tsdb.metrics.width();
+  final short tag_name_width = tsdb.tag_names.width();
+  final short tag_value_width = tsdb.tag_values.width();
+  final short num_tags = (short) tags.size();
+
+  int row_size = (Const.SALT_WIDTH() + metric_width + Const.TIMESTAMP_BYTES 
+      + tag_name_width * num_tags + tag_value_width * num_tags);
+  final byte[] row = new byte[row_size];
+
+  short pos = (short) Const.SALT_WIDTH();
+
+  copyInRowKey(row, pos,
+      (tsdb.config.auto_metric() ? tsdb.metrics.getOrCreateId(metric)
+          : tsdb.metrics.getId(metric)));
+  pos += metric_width;
+
+  pos += Const.TIMESTAMP_BYTES;
+
+  for (final byte[] tag : Tags.resolveOrCreateAll(tsdb, tags)) {
+    copyInRowKey(row, pos, tag);
+    pos += tag.length;
+  }
+  return row;
+}
+
+net.opentsdb.core.Tags
+  static ArrayList<byte[]> resolveOrCreateAll(final TSDB tsdb,
+                                              final Map<String, String> tags) {
+    return resolveAllInternal(tsdb, tags, true);
+  }
+  private
+  static ArrayList<byte[]> resolveAllInternal(final TSDB tsdb,
+                                              final Map<String, String> tags,
+                                              final boolean create)
+    throws NoSuchUniqueName {
+    final ArrayList<byte[]> tag_ids = new ArrayList<byte[]>(tags.size());
+    for (final Map.Entry<String, String> entry : tags.entrySet()) {
+      final byte[] tag_id = (create && tsdb.getConfig().auto_tagk()
+                             ? tsdb.tag_names.getOrCreateId(entry.getKey())
+                             : tsdb.tag_names.getId(entry.getKey()));
+      final byte[] value_id = (create && tsdb.getConfig().auto_tagv()
+                               ? tsdb.tag_values.getOrCreateId(entry.getValue())
+                               : tsdb.tag_values.getId(entry.getValue()));
+      final byte[] thistag = new byte[tag_id.length + value_id.length];
+      System.arraycopy(tag_id, 0, thistag, 0, tag_id.length);
+      System.arraycopy(value_id, 0, thistag, tag_id.length, value_id.length);
+      tag_ids.add(thistag);
+    }
+    // Now sort the tags.
+    Collections.sort(tag_ids, Bytes.MEMCMP);
+    return tag_ids;
+  }
+  
+```
+
+## Qualifier的生成：
+
+net.opentsdb.core.Const
+
+```
+public static final short MS_FLAG_BITS = 6;
+  public static final int MS_FLAG = 0xF0000000;
+  public static final short MAX_TIMESPAN = 3600;
+    public static final short FLAG_BITS = 4;
+```
+
+net.opentsdb.core.Internal#buildQualifier
 
 
+
+```
+
+
+
+public static byte[] buildQualifier(final long timestamp, final short flags) {
+  final long base_time;
+  if ((timestamp & Const.SECOND_MASK) != 0) {
+    // drop the ms timestamp to seconds to calculate the base timestamp
+    base_time = ((timestamp / 1000) - ((timestamp / 1000) 
+        % Const.MAX_TIMESPAN));
+    final int qual = (int) (((timestamp - (base_time * 1000) 
+        << (Const.MS_FLAG_BITS)) | flags) | Const.MS_FLAG);
+    return Bytes.fromInt(qual);
+  } else {
+    base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
+    final short qual = (short) ((timestamp - base_time) << Const.FLAG_BITS
+        | flags);
+    return Bytes.fromShort(qual);
+  }
+}
+```
+
+## Salt的生成：
+
+1.分成固定的20个桶（SALT_BUCKETS=20）
+
+2.global annotation 的Salt全为0
+
+3.根据rowkey里面的metrics和tagk/tagv对计算hash值，对SALT_BUCKETS取模
+
+4.对取模后的值进行位运算，获取最后的SALT key
+
+```
+public static void prefixKeyWithSalt(final byte[] row_key) {
+  if (Const.SALT_WIDTH() > 0) {
+    if (row_key.length < (Const.SALT_WIDTH() + TSDB.metrics_width()) || 
+      (Bytes.memcmp(row_key, new byte[Const.SALT_WIDTH() + TSDB.metrics_width()], 
+          Const.SALT_WIDTH(), TSDB.metrics_width()) == 0)) {
+      // ^ Don't salt the global annotation row, leave it at zero
+      return;
+    }
+    final int tags_start = Const.SALT_WIDTH() + TSDB.metrics_width() + 
+        Const.TIMESTAMP_BYTES;
+    
+    // we want the metric and tags, not the timestamp
+    final byte[] salt_base = 
+        new byte[row_key.length - Const.SALT_WIDTH() - Const.TIMESTAMP_BYTES];
+    System.arraycopy(row_key, Const.SALT_WIDTH(), salt_base, 0, TSDB.metrics_width());
+    System.arraycopy(row_key, tags_start,salt_base, TSDB.metrics_width(), 
+        row_key.length - tags_start);
+    int modulo = Arrays.hashCode(salt_base) % Const.SALT_BUCKETS();
+    if (modulo < 0) {
+      // make sure we return a positive salt.
+      modulo = modulo * -1;
+    }
+  
+    final byte[] salt = getSaltBytes(modulo);
+    System.arraycopy(salt, 0, row_key, 0, Const.SALT_WIDTH());
+  } // else salting is disabled so it's a no-op
+}
+
+  public static byte[] getSaltBytes(final int bucket) {
+    final byte[] bytes = new byte[Const.SALT_WIDTH()];
+    int shift = 0;
+    for (int i = 1;i <= Const.SALT_WIDTH(); i++) {
+      bytes[Const.SALT_WIDTH() - i] = (byte) (bucket >>> shift);
+      shift += 8;
+    }
+    return bytes;
+  }
+```
+
+## 数据保存：
+
+storeIntoDB
+
+分为三步：
+
+1。把第一步剩下的salt和timesatmp填充到rowkey
+
+2. 如果开启Append模式，调用Append写入；否则，是普通的数据写入，生成PutRequest
+3. 如果开启元数据，写入时间线元数据
+
+```
+private final Deferred<Object> storeIntoDB(final String metric, 
+                                           final long timestamp, 
+                                           final byte[] value,
+                                           final Map<String, String> tags, 
+                                           final short flags,
+                                           final byte[] row, 
+                                           final byte[] qualifier) {
+  final long base_time;
+
+  if ((timestamp & Const.SECOND_MASK) != 0) {
+    // drop the ms timestamp to seconds to calculate the base timestamp
+    base_time = ((timestamp / 1000) -
+        ((timestamp / 1000) % Const.MAX_TIMESPAN));
+  } else {
+    base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
+  }
+
+  /** Callback executed for chaining filter calls to see if the value
+   * should be written or not. */
+  final class WriteCB implements Callback<Deferred<Object>, Boolean> {
+    @Override
+    public Deferred<Object> call(final Boolean allowed) throws Exception {
+      if (!allowed) {
+        rejected_dps.incrementAndGet();
+        return Deferred.fromResult(null);
+      }
+      
+      //第一步：填充完全RowKey
+      
+      //第二步：处理Append模式
+      //或者：处理普通的数据写入
+      //或者： 直方图数据的写入
+        
+      } else {
+        scheduleForCompaction(row, (int) base_time);
+        final PutRequest histo_point = new PutRequest(table, row, FAMILY, qualifier, value);
+        result = client.put(histo_point);
+      }
+
+      // Count all added datapoints, not just those that came in through PUT rpc
+      // Will there be others? Well, something could call addPoint programatically right?
+      datapoints_added.incrementAndGet();
+
+      // TODO(tsuna): Add a callback to time the latency of HBase and store the
+      // timing in a moving Histogram (once we have a class for this).
+
+      if (!config.enable_realtime_ts() && !config.enable_tsuid_incrementing() &&
+          !config.enable_tsuid_tracking() && rt_publisher == null) {
+        return result;
+      }
+      
+      //第三步：写入时间线到元数据
+      final byte[] tsuid = UniqueId.getTSUIDFromKey(row, METRICS_WIDTH,
+          Const.TIMESTAMP_BYTES);
+
+      // if the meta cache plugin is instantiated then tracking goes through it
+      if (meta_cache != null) {
+        meta_cache.increment(tsuid);
+      } else {
+        if (config.enable_tsuid_tracking()) {
+          if (config.enable_realtime_ts()) {
+            if (config.enable_tsuid_incrementing()) {
+              TSMeta.incrementAndGetCounter(TSDB.this, tsuid);
+            } else {
+              TSMeta.storeIfNecessary(TSDB.this, tsuid);
+            }
+          } else {
+            final PutRequest tracking = new PutRequest(meta_table, tsuid,
+                TSMeta.FAMILY(), TSMeta.COUNTER_QUALIFIER(), Bytes.fromLong(1));
+            client.put(tracking);
+          }
+        }
+      }
+
+      if (rt_publisher != null) {
+        if (isHistogram(qualifier)) {
+          rt_publisher.publishHistogramPoint(metric, timestamp, value, tags, tsuid);
+        } else {
+          rt_publisher.sinkDataPoint(metric, timestamp, value, tags, tsuid, flags);
+        }
+      }
+      return result;
+    }
+    @Override
+    public String toString() {
+      return "addPointInternal Write Callback";
+    }
+  }
+
+  if (ts_filter != null && ts_filter.filterDataPoints()) {
+    if (isHistogram(qualifier)) {
+      return ts_filter.allowHistogramPoint(metric, timestamp, value, tags)
+              .addCallbackDeferring(new WriteCB());
+    } else {
+      return ts_filter.allowDataPoint(metric, timestamp, value, tags, flags)
+              .addCallbackDeferring(new WriteCB());
+    }
+  }
+  return Deferred.fromResult(true).addCallbackDeferring(new WriteCB());
+}
+```
+
+第一步：填充完全RowKey
+
+      //第一步：填充完全RowKey
+      Bytes.setInt(row, (int) base_time, metrics.width() + Const.SALT_WIDTH());
+      RowKey.prefixKeyWithSalt(row);
+
+第二步：处理Append模式
+
+Append的QUALIFIER 就是0x050000
+
+```
+  /** The full column qualifier for append columns */
+  public static final byte[] APPEND_COLUMN_QUALIFIER = new byte[] {
+    APPEND_COLUMN_PREFIX, 0x00, 0x00};
+
+
+      if (!isHistogram(qualifier) && config.enable_appends()) {
+        if(config.use_otsdb_timestamp()) {
+            LOG.error("Cannot use Date Tiered Compaction with AppendPoints. Please turn off either of them.");
+        }
+        final AppendDataPoints kv = new AppendDataPoints(qualifier, value);
+        final AppendRequest point = new AppendRequest(table, row, FAMILY,
+                AppendDataPoints.APPEND_COLUMN_QUALIFIER, kv.getBytes());
+        result = client.append(point);
+      } 
+```
+
+或者处理普通模式：
+
+
+
+```
+scheduleForCompaction(row, (int) base_time);
+final PutRequest point = RequestBuilder.buildPutRequest(config, table, row, FAMILY, qualifier, value, timestamp);
+result = client.put(point);
+
+这里针对时间戳进行了特殊处理：
+    public static PutRequest buildPutRequest(Config config, byte[] tableName, byte[] row, byte[] family, byte[] qualifier, byte[] value, long timestamp) {
+        
+        if(config.use_otsdb_timestamp()) 
+            if((timestamp & Const.SECOND_MASK) != 0)
+                return new PutRequest(tableName, row, family, qualifier, value, timestamp);
+            else
+                return new PutRequest(tableName, row, family, qualifier, value, timestamp * 1000);
+        else
+            return new PutRequest(tableName, row, family, qualifier, value);
+    }
+```
+
+注意这里会调度Compaction，而这里仅仅是把他加入到一个队列里面去，另外一个线程单独调度Compaction
+
+```
+final void scheduleForCompaction(final byte[] row, final int base_time) {
+  if (config.enable_compactions()) {
+    compactionq.add(row);
+  }
+}
+```
+
+## 时间线元数据的梳理
+
+自己看把，代码也比较简单，和几个配置相关
 
 # 2.Qualifer的相关操作：
 
@@ -403,8 +832,6 @@ public int compareTo(final TagVFilter filter) {
 ```java
 public abstract Deferred<Boolean> match(final Map<String, String> tags);
 ```
-
-3.提供HTTPGet请求的解析
 
 ## 2.4降采样规格
 
@@ -2554,7 +2981,7 @@ SpanGroup代表了不同的时间线的数据！
 
 ##### 疑问：
 
-这里的spans是不是排序的还不知道！
+这里的spans是不是排序的还不知道！（看后面mergeDataPoints是不排序的）
 
 ```
 SpanGroup(final TSDB tsdb,
@@ -2887,6 +3314,10 @@ public static AggregationIterator create(final List<Span> spans,
 
 这里缩小了时间范围，精确的匹配了查询的时间对应的数据点！这里的算法比较复杂，稍后分析。
 
+16-17行：首先定位到开始的时间戳，这里只是调用了这个函数，但是不一定能够找到合适的时间戳，因为span的seek再找不到的时候会把指针知道最后一个row
+
+29行：找到合适的数据，保存到对应的数组中。
+
 ```
 public AggregationIterator(final SeekableView[] iterators,
                             final long start_time,
@@ -2903,6 +3334,8 @@ public AggregationIterator(final SeekableView[] iterators,
   int num_empty_spans = 0;
   for (int i = 0; i < size; i++) {
     SeekableView it = iterators[i];
+    //这里不一定就是合适的值：
+    //如果span里面找不到就会返回最后一个row的！所以才会有后面的时间戳的判断！
     it.seek(start_time);
     DataPoint dp;
     if (!it.hasNext()) {
@@ -2955,7 +3388,7 @@ public AggregationIterator(final SeekableView[] iterators,
 }
 ```
 
-
+hasNext：查看是否有元素满足时间条件
 
 ```
 public boolean hasNext() {
@@ -2971,7 +3404,22 @@ public boolean hasNext() {
   //LOG.debug("No hasNext (return false)");
   return false;
 }
+```
+next：
 
+23-34行：首先要找出哪个时间戳最小，然后定位到对应的的iterator
+
+40行：找到对应的元素用来填充timestamps和values数组
+
+45-49行：把所有的最小时间戳的数据都读出来，填充到timestamps和values数组
+
+
+
+这里有一点要注意的是：
+
+聚合函数，需要读取所有的值，进行聚合，这里遍历不是hasNext，而是hasNextValue
+
+```
 public DataPoint next() {
   final int size = iterators.length;
   long min_ts = Long.MAX_VALUE;
@@ -3035,11 +3483,7 @@ private void moveToNext(final int i) {
   final int next = iterators.length + i;
   timestamps[i] = timestamps[next];
   values[i] = values[next];
-  //LOG.debug("Moving #" + next + " -> #" + i
-  //          + ((timestamps[i] & FLAG_FLOAT) == FLAG_FLOAT
-  //             ? " float " + Double.longBitsToDouble(values[i])
-  //             : " long " + values[i])
-  //          + " @ time " + (timestamps[i] & TIME_MASK));
+
   final SeekableView it = iterators[i];
   if (it.hasNext()) {
     putDataPoint(next, it.next());
@@ -3901,19 +4345,1363 @@ public static Scanner getMetricScanner(final TSDB tsdb, final int salt_bucket,
 
 - TSUID的过滤设置
 
-#### Span的查找
+  TSUID都是可见字符，需要首先变为原来的二进制，
+
+  8-13行 把所有的tagk和tagv的uid变为二进制；
+
+  10行这里忽略了metrics，因为这个在前面设置rowkey的start和end的时候已经设置好了。
+
+  
+
+  主要看看正则表达式：
+
+  1.(?s)表示DOTALL，
+
+  `(?:)` creates a *non-capturing group*. It groups things together without creating a backreference. 
+
+  
+
+  | [Positive lookahead](https://www.regular-expressions.info/lookaround.html) | `(?=regex)` | Matches at a position where the pattern inside the lookahead can be matched. Matches only the position. It does not consume any characters or expand the match. In a pattern like `one(?=two)three`, both `two` and `three` have to match at the position where the match of `one` ends. | `t(?=s)` matches the second `t`in `streets`. | YES  | YES  |
+  | ------------------------------------------------------------ | ----------- | ------------------------------------------------------------ | -------------------------------------------- | ---- | ---- |
+  | [Negative lookahead](https://www.regular-expressions.info/lookaround.html) | `(?!regex)` | Similar to positive lookahead, except that negative lookahead only succeeds if the regex inside the lookahead fails to match. | `t(?!s)` matches the first `t` in `streets`. | YES  | YES  |
+
+  1.DOTALL语义：这里使用了(?s),主要是因为我们的数据是二进制的，不能当成文本处理
+
+  > java.util.regex.Pattern
+
+      /**
+       * Enables dotall mode.
+       *
+       * <p> In dotall mode, the expression <tt>.</tt> matches any character,
+       * including a line terminator.  By default this expression does not match
+       * line terminators.
+       *
+       * <p> Dotall mode can also be enabled via the embedded flag
+       * expression&nbsp;<tt>(?s)</tt>.  (The <tt>s</tt> is a mnemonic for
+       * "single-line" mode, which is what this is called in Perl.)  </p>
+       */
+  \\Q\000\000\001\000\000\002\\E
+
+  \Q和\E之间的内容表示引用QUote，引用就是不代表特殊含义，里面的仅仅是数据而已。
+
+  
+```
+public static String getRowKeyTSUIDRegex(final List<String> tsuids) {
+  Collections.sort(tsuids);
+  
+  // first, convert the tags to byte arrays and count up the total length
+  // so we can allocate the string builder
+  final short metric_width = TSDB.metrics_width();
+  int tags_length = 0;
+  final ArrayList<byte[]> uids = new ArrayList<byte[]>(tsuids.size());
+  
+  //先把明文转换为二进制字符
+  for (final String tsuid : tsuids) {
+    final String tags = tsuid.substring(metric_width * 2);
+    final byte[] tag_bytes = UniqueId.stringToUid(tags);
+    tags_length += tag_bytes.length;
+    uids.add(tag_bytes);
+  }
+  
+  // Generate a regexp for our tags based on any metric and timestamp (since
+  // those are handled by the row start/stop) and the list of TSUID tagk/v
+  // pairs. The generated regex will look like: ^.{7}(tags|tags|tags)$
+  // where each "tags" is similar to \\Q\000\000\001\000\000\002\\E
+  final StringBuilder buf = new StringBuilder(
+      13  // "(?s)^.{N}(" + ")$"
+      + (tsuids.size() * 11) // "\\Q" + "\\E|"
+      + tags_length); // total # of bytes in tsuids tagk/v pairs
+  
+  // Alright, let's build this regexp.  From the beginning...
+  buf.append("(?s)"  // Ensure we use the DOTALL flag.
+             + "^.{")
+     // ... start by skipping the metric ID and timestamp.
+     .append(Const.SALT_WIDTH() + metric_width + Const.TIMESTAMP_BYTES)
+     .append("}(");
+  
+  for (final byte[] tags : uids) {
+     // quote the bytes
+    buf.append("\\Q");
+    addId(buf, tags, true);
+    buf.append('|');
+  }
+  
+  // Replace the pipe of the last iteration, close and set
+  buf.setCharAt(buf.length() - 1, ')');
+  buf.append("$");
+  return buf.toString();
+}
+
+这里主要是针对\E进行了特殊处理。因为数据里面有可能是\E，必须转换为\\\E
+public static void addId(final StringBuilder buf, final byte[] id, 
+      final boolean close) {
+    boolean backslash = false;
+    for (final byte b : id) {
+      buf.append((char) (b & 0xFF));
+      if (b == 'E' && backslash) {  // If we saw a `\' and now we have a `E'.
+        // So we just terminated the quoted section because we just added \E
+        // to `buf'.  So let's put a litteral \E now and start quoting again.
+        buf.append("\\\\E\\Q");
+      } else {
+        backslash = b == '\\';
+      }
+    }
+    if (close) {
+      buf.append("\\E");
+    }
+  }
+```
+
+这个正则表达式的意思是：
+
+1. DOTALL，作为单行对待
+2. 以Const.SALT_WIDTH() + metric_width + Const.TIMESTAMP_BYTES个任意字符开头
+3. 后面跟着多个tagk(3字节)tagv三字节（如注释所示： \\Q\000\000\001\000\000\002\\E）
+4. 添加结尾符号$
+
+实际就是根据确定的tagk tagv增加一种过滤，因为tagk，tagv都已经是很明确的了，都包含在tsuiud这个时间线里面了。
+
+- 非时间线的过滤
+
+  如果explicit_tags那么使用FuzzyRowFilter，否则使用KeyRegexpFilter
+
+> net.opentsdb.core.TsdbQuery#createAndSetTSUIDFilter
+
+```
+private void createAndSetFilter(final Scanner scanner) {
+  QueryUtil.setDataTableScanFilter(scanner, group_bys, row_key_literals, 
+      explicit_tags, enable_fuzzy_filter, 
+      (end_time == UNSET
+      ? -1  // Will scan until the end (0xFFF...).
+      : (int) getScanEndTimeSeconds()));
+}
+
+public static void setDataTableScanFilter(
+      final Scanner scanner, 
+      final List<byte[]> group_bys, 
+      final ByteMap<byte[][]> row_key_literals,
+      final boolean explicit_tags,
+      final boolean enable_fuzzy_filter,
+      final int end_time) {
+    
+    // no-op
+    if ((group_bys == null || group_bys.isEmpty()) 
+        && (row_key_literals == null || row_key_literals.isEmpty())) {
+      return;
+    }
+    
+    final int prefix_width = Const.SALT_WIDTH() + TSDB.metrics_width() + 
+        Const.TIMESTAMP_BYTES;
+    final short name_width = TSDB.tagk_width();
+    final short value_width = TSDB.tagv_width();
+    final byte[] fuzzy_key;
+    final byte[] fuzzy_mask;
+    //如果明确所有的tag已经提供了，那么只需要使用Hbase的模糊匹配，需要提供掩码
+    if (explicit_tags && enable_fuzzy_filter) {
+      fuzzy_key = new byte[prefix_width + (row_key_literals.size() * 
+          (name_width + value_width))];
+      fuzzy_mask = new byte[prefix_width + (row_key_literals.size() *
+          (name_width + value_width))];
+      System.arraycopy(scanner.getCurrentKey(), 0, fuzzy_key, 0, 
+          scanner.getCurrentKey().length);
+    } else {
+      fuzzy_key = fuzzy_mask = null;
+    }
+    
+    final String regex = getRowKeyUIDRegex(group_bys, row_key_literals, 
+        explicit_tags, fuzzy_key, fuzzy_mask);
+    final KeyRegexpFilter regex_filter = new KeyRegexpFilter(
+        regex.toString(), Const.ASCII_CHARSET);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Regex for scanner: " + scanner + ": " + 
+          byteRegexToString(regex));
+    }
+    
+    //普通查询，只使用正则表达式
+    if (!(explicit_tags && enable_fuzzy_filter)) {
+      scanner.setFilter(regex_filter);
+      return;
+    }
+    
+    //explicit_tags的话，通过前面的掩码，设置FuzzyRowFilter
+    scanner.setStartKey(fuzzy_key);
+    final byte[] stop_key = Arrays.copyOf(fuzzy_key, fuzzy_key.length);
+    Internal.setBaseTime(stop_key, end_time);
+    int idx = Const.SALT_WIDTH() + TSDB.metrics_width() + 
+        Const.TIMESTAMP_BYTES + TSDB.tagk_width();
+    // max out the tag values
+    while (idx < stop_key.length) {
+      for (int i = 0; i < TSDB.tagv_width(); i++) {
+        stop_key[idx++] = (byte) 0xFF;
+      }
+      idx += TSDB.tagk_width();
+    }
+    scanner.setStopKey(stop_key);
+    final List<ScanFilter> filters = new ArrayList<ScanFilter>(2);
+    filters.add(
+        new FuzzyRowFilter(
+            new FuzzyRowFilter.FuzzyFilterPair(fuzzy_key, fuzzy_mask)));
+    filters.add(regex_filter);
+    scanner.setFilter(new FilterList(filters));
+  }
+  
+  
+```
+
+
+
+注意：
+
+1. findGroupBys里面设置了group_bys和row_key_literals； 
+
+   row_key_literals = new ByteMap<byte[][]>();
+
+2. tsd.query.enable_fuzzy_filter配置项对应enable_fuzzy_filter
+
+3. explicit_tags是查询带过来的参数
+
+下面我们主要看看row_key_literals和group_bys是怎么用的？
 
 
 
 
+
+主要看这个函数：
+
+73-89行：针对groupby的，正则表达式形式为 首先是key，然后是value|value，如果value为空，那么就是一个通配符${N}，这样就只匹配了tagk；
+
+97-98行，匹配任意的tagk/tagv对
+
+上面两处，构造了完成的正则表达式；
+
+> net.opentsdb.query.QueryUtil#getRowKeyUIDRegex(java.util.List<byte[]>, org.hbase.async.Bytes.ByteMap<byte[][]>, boolean, byte[], byte[])
+
+```
+public static String getRowKeyUIDRegex(
+    final List<byte[]> group_bys, 
+    final ByteMap<byte[][]> row_key_literals, 
+    final boolean explicit_tags,
+    final byte[] fuzzy_key, 
+    final byte[] fuzzy_mask) {
+  if (group_bys != null) {
+    Collections.sort(group_bys, Bytes.MEMCMP);
+  }
+  final int prefix_width = Const.SALT_WIDTH() + TSDB.metrics_width() + 
+      Const.TIMESTAMP_BYTES;
+  final short name_width = TSDB.tagk_width();
+  final short value_width = TSDB.tagv_width();
+  //tagk tagv对，所以这里是6
+  final short tagsize = (short) (name_width + value_width);
+  // Generate a regexp for our tags.  Say we have 2 tags: { 0 0 1 0 0 2 }
+  // and { 4 5 6 9 8 7 }, the regexp will be:
+  // "^.{7}(?:.{6})*\\Q\000\000\001\000\000\002\\E(?:.{6})*\\Q\004\005\006\011\010\007\\E(?:.{6})*$"
+  final StringBuilder buf = new StringBuilder(
+      15  // "^.{N}" + "(?:.{M})*" + "$"
+      + ((13 + tagsize) // "(?:.{M})*\\Q" + tagsize bytes + "\\E"
+         * ((row_key_literals == null ? 0 : row_key_literals.size()) + 
+             (group_bys == null ? 0 : group_bys.size() * 3))));
+  // In order to avoid re-allocations, reserve a bit more w/ groups ^^^
+
+  // Alright, let's build this regexp.  From the beginning...
+  //确保DOTALL语义，然后跳过SALT和metrics和时间戳，
+  buf.append("(?s)"  // Ensure we use the DOTALL flag.
+             + "^.{")
+     // ... start by skipping the salt, metric ID and timestamp.
+     .append(Const.SALT_WIDTH() + TSDB.metrics_width() + Const.TIMESTAMP_BYTES)
+     .append("}");
+
+  final Iterator<Entry<byte[], byte[][]>> it = row_key_literals == null ? 
+      new ByteMap<byte[][]>().iterator() : row_key_literals.iterator();
+  int fuzzy_offset = Const.SALT_WIDTH() + TSDB.metrics_width();
+  if (fuzzy_mask != null) {
+    // make sure to skip the timestamp when scanning
+    while (fuzzy_offset < prefix_width) {
+      fuzzy_mask[fuzzy_offset++] = 1;
+    }
+  }
+  
+  while(it.hasNext()) {
+    Entry<byte[], byte[][]> entry = it.hasNext() ? it.next() : null;
+    // TODO - This look ahead may be expensive. We need to get some data around
+    // whether it's faster for HBase to scan with a look ahead or simply pass
+    // the rows back to the TSD for filtering.
+    final boolean not_key = 
+        entry.getValue() != null && entry.getValue().length == 0;
+    
+    // Skip any number of tags.
+    if (!explicit_tags) {
+      buf.append("(?:.{").append(tagsize).append("})*");
+    } else if (fuzzy_mask != null) {
+      // TODO - see if we can figure out how to improve the fuzzy filter by
+      // setting explicit tag values whenever we can. In testing there was
+      // a conflict between the row key regex and fuzzy filter that prevented
+      // results from returning properly.
+      System.arraycopy(entry.getKey(), 0, fuzzy_key, fuzzy_offset, name_width);
+      fuzzy_offset += name_width;
+      for (int i = 0; i < value_width; i++) {
+        fuzzy_mask[fuzzy_offset++] = 1;
+      }
+    }
+    if (not_key) {
+      // start the lookahead as we have a key we explicitly do not want in the
+      // results
+      buf.append("(?!");
+    }
+    buf.append("\\Q");
+    
+    addId(buf, entry.getKey(), true);
+    if (entry.getValue() != null && entry.getValue().length > 0) {  // Add a group_by.
+      // We want specific IDs.  List them: /(AAA|BBB|CCC|..)/
+      buf.append("(?:");
+      for (final byte[] value_id : entry.getValue()) {
+        if (value_id == null) {
+          continue;
+        }
+        buf.append("\\Q");
+        addId(buf, value_id, true);
+        buf.append('|');
+      }
+      // Replace the pipe of the last iteration.
+      buf.setCharAt(buf.length() - 1, ')');
+    } else {
+      buf.append(".{").append(value_width).append('}');  // Any value ID.
+    }
+    
+    if (not_key) {
+      // be sure to close off the look ahead
+      buf.append(")");
+    }
+  }
+  // Skip any number of tags before the end.
+  if (!explicit_tags) {
+    buf.append("(?:.{").append(tagsize).append("})*");
+  }
+  buf.append("$");
+  return buf.toString();
+}
+```
+
+
+
+如果启用了Salt，就会生成20个Scanner，否则就是1个Scanner，Tsdb用SaltScanner封装了这种差异，统一用这类来表示：
+
+```
+public SaltScanner(final TSDB tsdb, final byte[] metric,
+    final List<Scanner> scanners,
+    final TreeMap<byte[], Span> spans,
+    final List<TagVFilter> filters,
+    final boolean delete,
+    final RollupQuery rollup_query,
+    final QueryStats query_stats,
+    final int query_index,
+    final TreeMap<byte[], HistogramSpan> histogramSpans,
+    final long max_bytes,
+    final long max_data_points,
+    final List<TagVFilter> value_filters) {
+    .......
+    
+    countdown = new CountDownLatch(scanners.size());
+ }   
+    
+```
+
+每个Scanner执行完毕后，都会将countdown减一，当countdown计数为0的时候表示查询都已经返回了。
+
+
+
+```
+void close(final boolean ok) {
+scanner.close();
+...
+if (ok && exception == null) {
+        validateAndTriggerCallback(kvs, annotations, histograms);
+      } else {
+        countdown.countDown();
+      }
+}
+
+
+private void validateAndTriggerCallback(
+          final List<KeyValue> kvs,
+          final Map<byte[], List<Annotation>> annotations,
+          final List<SimpleEntry<byte[], List<HistogramDataPoint>>> histograms) {
+
+    //减少计数
+    countdown.countDown();
+    final long count = countdown.getCount();
+    if (kvs.size() > 0) {
+      //kv_map保存的是每个scanner对应的数据
+      kv_map.put((int) count, kvs);
+    }
+    ......
+    //所有的都返回了
+    if (countdown.getCount() <= 0) {
+      try {
+        mergeAndReturnResults();
+      } catch (final Exception ex) {
+        results.callback(ex);
+      }
+    }
+  }
+```
+
+
+
+最后tsdb调用
+
+net.opentsdb.core.SaltScanner#scan
+
+启动数据异步加载逻辑；
+
+```
+public Object scan() {
+  if (scanner_start < 0) {
+    scanner_start = DateTime.nanoTime();
+  }
+  fetch_start = DateTime.nanoTime();
+  return scanner.nextRows().addCallback(this).addErrback(new ErrorCb());
+}
+```
+
+
+
+数据的接收：
+
+
+
+从scan可以看出，接收到数据之后的回调是this，因此我们看net.opentsdb.core.SaltScanner#call函数：
+
+
+
+```
+public Object call2(final ArrayList<ArrayList<KeyValue>> rows) throws Exception {
+  try {
+    //rows == null表示这个Scanner已经扫描到最后了，所以需要关闭Scanner进行后续处理
+    if (rows == null) {
+      close(true);
+      return null;
+    }
+    .....
+
+    // used for UID resolution if a filter is involved
+    //存放的是ID对name的反解析
+    final List<Deferred<Object>> lookups =
+            filters != null && !filters.isEmpty() ?
+                    new ArrayList<Deferred<Object>>(rows.size()) : null;
+
+    ...一些限流计算，比如加载到的数据点数，字节数等等
+
+      // If any filters have made it this far then we need to resolve
+      // the row key UIDs to their names for string comparison. We'll
+      // try to avoid the resolution with some sets but we may dupe
+      // resolve a few times.
+      // TODO - more efficient resolution
+      // TODO - byte set instead of a string for the uid may be faster
+      if (filters != null && !filters.isEmpty()) {
+        lookups.clear();
+        //执行查询的数据过滤，如果时间线已经被过滤了，那么就直接跳过，这里skips记录的就是那些被过滤的数据
+        final String tsuid =
+                UniqueId.uidToString(UniqueId.getTSUIDFromKey(key,
+                        TSDB.metrics_width(), Const.TIMESTAMP_BYTES));
+        if (skips.contains(tsuid)) {
+          continue;
+        }
+        //keepers记录的是保留的数据。因为我们的查询输入的是tagk的name，不是二进制的编码，所以在这里需要把tagk的二进制编码重新解析为名字，然后用过滤器去判断是不是符合要求的数据，所以首先GetTagsCB，然后再调用MatchCB
+        if (!keepers.contains(tsuid)) {
+          final long uid_start = DateTime.nanoTime();
+
+          /** CB to called after all of the UIDs have been resolved */
+          class MatchCB implements Callback<Object, ArrayList<Boolean>> {
+            @Override
+            public Object call(final ArrayList<Boolean> matches)
+                    throws Exception {
+              for (final boolean matched : matches) {
+                if (!matched) {
+                  skips.add(tsuid);
+                  return null;
+                }
+              }
+              // matched all, good data
+              keepers.add(tsuid);
+              processRow(key, row);
+              return null;
+            }
+          }
+
+          /** Resolves all of the row key UIDs to their strings for filtering */
+          class GetTagsCB implements
+                  Callback<Deferred<ArrayList<Boolean>>, Map<String, String>> {
+            @Override
+            public Deferred<ArrayList<Boolean>> call(
+                    final Map<String, String> tags) throws Exception {
+              uid_resolve_time += (DateTime.nanoTime() - uid_start);
+              uids_resolved += tags.size();
+              final List<Deferred<Boolean>> matches =
+                      new ArrayList<Deferred<Boolean>>(filters.size());
+
+              for (final TagVFilter filter : filters) {
+                //注意：这里一旦解析成功，就会调用filter进行判断，是否符合过滤条件，把true或者false保存到matches这个数组中。
+                matches.add(filter.match(tags));
+              }
+
+              return Deferred.group(matches);
+            }
+          }
+
+          lookups.add(Tags.getTagsAsync(tsdb, key)
+                  .addCallbackDeferring(new GetTagsCB())
+                  .addBoth(new MatchCB()));
+        } else {
+          processRow(key, row);
+        }
+      } else {
+        processRow(key, row);
+      }
+    }
+
+    // either we need to wait on the UID resolutions or we can go ahead
+    // if we don't have filters.
+    if (lookups != null && lookups.size() > 0) {
+      class GroupCB implements Callback<Object, ArrayList<Object>> {
+        @Override
+        public Object call(final ArrayList<Object> group) throws Exception {
+          return scan();
+        }
+      }
+      return Deferred.group(lookups).addCallback(new GroupCB());
+    } else {
+      return scan();
+    }
+  } catch (final RuntimeException e) {
+    LOG.error("Unexpected exception on scanner " + this, e);
+    close(false);
+    handleException(e);
+    return null;
+  }
+}
+
+void processRow(final byte[] key, final ArrayList<KeyValue> row) {
+      ++rows_post_filter;
+      if (delete) {
+        final DeleteRequest del = new DeleteRequest(tsdb.dataTable(), key);
+        tsdb.getClient().delete(del);
+      }
+
+        final KeyValue compacted;
+        try {
+          final List<Annotation> notes = Lists.newArrayList();
+          compacted = tsdb.compact(row, notes, hists);
+        if (compacted != null) { // Can be null if we ignored all KVs.
+          kvs.add(compacted);
+        }
+      }
+    }
+```
+
+
+
+从上面的call可以看出，数据的第一步处理逻辑：
+
+1.针对scanner的数据，根据rowkey，调用Tags.getTagsAsync对每一个tagk/tagv进行uid到name的解析，保存到一个Map里面返回。
+
+2.针对Map里面的每个tagk，调用过滤器的match函数，判断是否需要过滤
+
+3.针对需要保留的数据，调用函数processRow，processRow主要执行两个逻辑：a：如果查询需要delete数据，那么就生成一个DeleteRequest，b：保存到kvs成员变量中；
+
+4.如此一直处理，一直等到所有的scanner加载完毕。
+
+#### 数据的合并
+
+数据加载完毕后，会调用close函数.
+
+25-27行：每个scanner返回的结果，都会存放到kv_map，key是countdown的返回值，这个只是一个临时标记，用来区分不同的scanner返回的数据，
+
+```
+void close(final boolean ok) {
+    scanner.close();
+
+    ...一些统计歇息...
+    if (ok && exception == null) {
+      validateAndTriggerCallback(kvs, annotations, histograms);
+    } else {
+      countdown.countDown();
+    }
+  }
+}
+
+/**
+ * Called each time a scanner completes with valid or empty data.
+ * @param kvs The compacted columns fetched by the scanner
+ * @param annotations The annotations fetched by the scanners
+ */
+private void validateAndTriggerCallback(
+        final List<KeyValue> kvs,
+        final Map<byte[], List<Annotation>> annotations,
+        final List<SimpleEntry<byte[], List<HistogramDataPoint>>> histograms) {
+
+  countdown.countDown();
+  final long count = countdown.getCount();
+  if (kvs.size() > 0) {
+    kv_map.put((int) count, kvs);
+  }
+  
+  if (countdown.getCount() <= 0) {
+    try {
+      mergeAndReturnResults();
+    } catch (final Exception ex) {
+      results.callback(ex);
+    }
+  }
+}
+```
+
+> net.opentsdb.core.SaltScanner#mergeAndReturnResults
+
+```
+private void mergeAndReturnResults() {
+ ......
+  //Merge sorted spans together
+  if (!isHistogramScan()) {
+    mergeDataPoints();
+  } else {
+    // Merge histogram data points
+    mergeHistogramDataPoints();
+  }
+  .....
+  if (!isHistogramScan()) {
+    results.callback(spans);
+  } else {
+    histogramResults.callback(histSpans);
+  }
+}
+```
+
+上面最主要的代码有以下功能：
+
+1。mergeDataPoints合并数据
+
+2.调用CallBack。这里是和函数net.opentsdb.core.SaltScanner#scan前后呼应的。因为下面函数直接启动了scan之后就返回result了，这时候result啥都没有，知道数据处理完毕后，才调用callback，通知回调函数进行处理。
+
+```
+public Deferred<TreeMap<byte[], Span>> scan() {
+  start_time = System.currentTimeMillis();
+  int i = 0;
+  for (final Scanner scanner: scanners) {
+    new ScannerCB(scanner, i++).scan();
+  }
+  return results;
+}
+```
+
+所以最主要的函数就是mergeDataPoints
+
+注意如下代码：spans是一个TreeMap，使用了SpanCmp作为比较器。
+
+```
+private Deferred<TreeMap<byte[], Span>> findSpans() throws HBaseException {
+  final short metric_width = tsdb.metrics.width();
+  final TreeMap<byte[], Span> spans = // The key is a row key from HBase.
+    new TreeMap<byte[], Span>(new SpanCmp(
+        (short)(Const.SALT_WIDTH() + metric_width)));
+  
+    .......
+    return new SaltScanner(tsdb, metric, scanners, spans, scanner_filters,
+        delete, rollup_query, query_stats, query_index, null, 
+        max_bytes, max_data_points,this.valueFilters).scan();
+  
+}
+```
+
+
+
+```
+private void mergeDataPoints() {
+    // Merge sorted spans together
+
+      for (final KeyValue kv : kvs) {
+        ...
+        Span datapoints = spans.get(kv.key());
+        if (datapoints == null) {
+          datapoints = RollupQuery.isValidQuery(rollup_query) ?
+                  new RollupSpan(tsdb, this.rollup_query) : new Span(tsdb);
+          spans.put(kv.key(), datapoints);
+        }
+
+        try {
+          datapoints.addRow(kv);
+        } catch (RuntimeException e) {
+          LOG.error("Exception adding row to span", e);
+          throw e;
+        }
+    }
+  }
+  
+```
+
+其实这里很简单，就是把所有的KeyValue数据组装成一个一个的Span。Span会按照数据结构小节讨论的进行数据组装。注意spans的key是rowkey，就是spans里面存放了所有的rowkey，很多不同的rowkey（时间戳不一样），即使有不同的时间戳的数据，也只有第一条能加进去，剩下的都加入到Span里面去了！。Spans的keys是所有的时间线，而不是所有的rowkey，因为相同的时间线后续的时间点的数据是不能作为key加入进去的，只能加入到相应的作为value的span里面去！
+
+
+
+至此，数据已经加载完成，并且完成了数据的逻辑上的组装。
+
+所以数据流会回到findSpans，findSpans执行完毕后，results.callback(spans);，利用spans通知后续的回调；
+
+而runAsync的代码里面n:result = findSpans().addCallback(new GroupByAndAggregateCB());
+
+所以我们就得看GroupByAndAggregateCB怎么对数据进行GroupByAndAggregate：
+
+#### 数据的汇总
+
+> *GroupByAndAggregateCB*
+
+```
+/**
+ * Callback that should be attached the the output of
+ * {@link TsdbQuery#findSpans} to group and sort the results.
+ */
+private class GroupByAndAggregateCB implements 
+  Callback<DataPoints[], TreeMap<byte[], Span>>{
+  
+  /**
+  * Creates the {@link SpanGroup}s to form the final results of this query.
+  * @param spans The {@link Span}s found for this query ({@link #findSpans}).
+  * Can be {@code null}, in which case the array returned will be empty.
+  * @return A possibly empty array of {@link SpanGroup}s built according to
+  * any 'GROUP BY' formulated in this query.
+  */
+  @Override
+  public DataPoints[] call(final TreeMap<byte[], Span> spans) throws Exception {
+   ......
+    情况1：聚合函数为none的情况；
+    情况2：没有分组的情况;
+    情况3：有groupby，根据grouby的tagv进行分组
+}
+```
+
+汇总时，分了三种情况：
+
+1.聚合函数为none
+
+```
+// The raw aggregator skips group bys and ignores downsampling
+    //这里的注释是错误的，没有忽略降采样，即使aggregator为none，降采样也会带过去，降采样也会按照自己的汇总函数汇总的
+    if (aggregator == Aggregators.NONE) {
+      final SpanGroup[] groups = new SpanGroup[spans.size()];
+      int i = 0;
+      for (final Span span : spans.values()) {
+        final SpanGroup group = new SpanGroup(
+            tsdb, 
+            getScanStartTimeSeconds(),
+            getScanEndTimeSeconds(),
+            null, //注意这里传的是NULL，如果不是null，会把所有的spans都加入到一个group里面去，而这里需要的是每个span一个group。
+            rate, 
+            rate_options,
+            aggregator,
+            downsampler,
+            getStartTime(), 
+            getEndTime(),
+            query_index,
+            rollup_query);
+        group.add(span);
+        groups[i++] = group;
+      }
+      return groups;
+    }
+```
+
+2.没有分组，就是{}都是空的，这时候默认只有一个分组
+
+```
+if (group_bys == null) {
+      // We haven't been asked to find groups, so let's put all the spans
+      // together in the same group.
+      final SpanGroup group = new SpanGroup(tsdb,
+                                            getScanStartTimeSeconds(),
+                                            getScanEndTimeSeconds(),
+                                            spans.values(),
+                                            rate, rate_options,
+                                            aggregator,
+                                            downsampler,
+                                            getStartTime(), 
+                                            getEndTime(),
+                                            query_index,
+                                            rollup_query);
+      if (query_stats != null) {
+        query_stats.addStat(query_index, QueryStat.GROUP_BY_TIME, 0);
+      }
+      return new SpanGroup[] { group };
+    }
+```
+
+ 情况3：有groupby，根据grouby的tagv进行分组
+
+```
+// Maps group value IDs to the SpanGroup for those values. Say we've
+    // been asked to group by two things: foo=* bar=* Then the keys in this
+    // map will contain all the value IDs combinations we've seen. If the
+    // name IDs for `foo' and `bar' are respectively [0, 0, 7] and [0, 0, 2]
+    // then we'll have group_bys=[[0, 0, 2], [0, 0, 7]] (notice it's sorted
+    // by ID, so bar is first) and say we find foo=LOL bar=OMG as well as
+    // foo=LOL bar=WTF and that the IDs of the tag values are:
+    // LOL=[0, 0, 1] OMG=[0, 0, 4] WTF=[0, 0, 3]
+    // then the map will have two keys:
+    // - one for the LOL-OMG combination: [0, 0, 1, 0, 0, 4] and,
+    // - one for the LOL-WTF combination: [0, 0, 1, 0, 0, 3].
+    final ByteMap<SpanGroup> groups = new ByteMap<SpanGroup>();
+    final short value_width = tsdb.tag_values.width();
+    final byte[] group = new byte[group_bys.size() * value_width];
+    for (final Map.Entry<byte[], Span> entry : spans.entrySet()) {
+      //这里是每一行的rowkey
+      final byte[] row = entry.getKey();
+      byte[] value_id = null;
+      int i = 0;
+      // TODO(tsuna): The following loop has a quadratic behavior. We can
+      // make it much better since both the row key and group_bys are sorted.
+      for (final byte[] tag_id : group_bys) {
+        value_id = Tags.getValueId(tsdb, row, tag_id);
+        if (value_id == null) {
+          break;
+        }
+        System.arraycopy(value_id, 0, group, i, value_width);
+        i += value_width;
+      }
+      //经过上述的循环后，group里面已经存放的是只有参与汇总的tagv的uid了，利用这个group做key，
+      //保存到groups里面去
+      if (value_id == null) {
+        LOG.error("WTF? Dropping span for row " + Arrays.toString(row)
+                 + " as it had no matching tag from the requested groups,"
+                 + " which is unexpected. Query=" + this);
+        continue;
+      }
+
+  SpanGroup thegroup = groups.get(group);
+  if (thegroup == null) {
+    thegroup = new SpanGroup(tsdb, getScanStartTimeSeconds(),
+                             getScanEndTimeSeconds(),
+                             null, rate, rate_options, aggregator,
+                             downsampler,
+                             getStartTime(), 
+                             getEndTime(),
+                             query_index,
+                             rollup_query);
+    // Copy the array because we're going to keep `group' and overwrite
+    // its contents. So we want the collection to have an immutable copy.
+    final byte[] group_copy = new byte[group.length];
+    System.arraycopy(group, 0, group_copy, 0, group.length);
+    groups.put(group_copy, thegroup);
+  }
+  thegroup.add(entry.getValue());
+}
+if (query_stats != null) {
+  query_stats.addStat(query_index, QueryStat.GROUP_BY_TIME, 0);
+}
+return groups.values().toArray(new SpanGroup[groups.size()]);
+}
+```
+
+主要逻辑：
+
+遍历spans（spans的keys是所有的符合条件的时间线！），实际上就是遍历所有的时间线，单独挑出时间线中属于groupby的tagv的值，把这些值弄到一个group变量里面去，利用这个group作为key，把属于一组的span加入到SpanGroup里面去！
+
+
+
+这时候数据就组装完成了！
+
+#### 数据的读取
+
+最后一行，返回的DataPoints[]数组，实际上就是SpanGroup数组，这里会利用iterator进行遍历，所以就又回到前面的分析去了，分析SpanGroup,Span,RowSeq的iterator的实现，通过即时计算来获取需要的时间戳和值，
 
 # 6.Compact的实现
 
-# 7.元数据的写入
+## 压缩相关配置默认值;
 
-# 8.批量数据的导入
+```
 
-# 9.其他功能：
+
+default_map.put("tsd.storage.enable_compaction", "true");
+default_map.put("tsd.storage.compaction.flush_interval", "10");
+default_map.put("tsd.storage.compaction.min_flush_threshold", "100");
+default_map.put("tsd.storage.compaction.max_concurrent_flushes", "10000");
+default_map.put("tsd.storage.compaction.flush_speed", "2");
+```
+
+
+
+
+> CompactionQueue
+>
+
+
+
+## 基本流程：
+
+CompactionQueue开启单独的线程进行压缩：
+
+net.opentsdb.utils.Config
+
+
+
+
+
+1.构造函数里面：Cmp(tsdb),比较器;根据timestamp比较元素
+
+2.compcat只压缩过时的数据（至少是上个小时的）
+
+3.出现OOM的时候queue会清空自己：）
+
+4.每次compact之后会sleep flush_interval*1000毫秒，所以flush_speed至少为2，否则有可能compact不玩：）。我艹！
+
+5.到底一次Flush多少元素？一般来讲，以时间为比例，假设我们10秒compact一次，那么一个小时的数据一共3600秒，那么我们应该flush 1/360*size的总数据，但是为了加快compact的速度，可以设置flush_speed，如果设置为2，那么就一次flush 2\*1/360=1/180\*size个。同时在这个数与min_flush_threshold取最大者，也就是每次至少100条。
+
+6.这个线程是常驻的，如果发生了异常，会尽可能处理，否则重启一个线程，然后退出，
+
+7.遍历rowkey，get出来，调用compact
+
+```
+final class CompactionQueue extends ConcurrentSkipListMap<byte[], Boolean> {
+
+
+public CompactionQueue(final TSDB tsdb) {
+    super(new Cmp(tsdb));
+    this.tsdb = tsdb;
+    metric_width = tsdb.metrics.width();
+    flush_interval = tsdb.config.getInt("tsd.storage.compaction.flush_interval");
+    min_flush_threshold = tsdb.config.getInt("tsd.storage.compaction.min_flush_threshold");
+    max_concurrent_flushes = tsdb.config.getInt("tsd.storage.compaction.max_concurrent_flushes");
+    flush_speed = tsdb.config.getInt("tsd.storage.compaction.flush_speed");
+
+    //开启单独的线程
+    if (tsdb.config.enable_compactions()) {
+      startCompactionThread();
+    }
+  }  
+
+
+  private void startCompactionThread() {
+    final Thrd thread = new Thrd();
+    thread.setDaemon(true);
+    thread.start();
+  }
+
+final class Thrd extends Thread {
+    public Thrd() {
+      super("CompactionThread");
+    }
+
+    @Override
+    public void run() {
+      while (true) {
+          ...
+          final int size = size();
+          if (size > min_flush_threshold) {
+            //计算需要flush的数量
+            final int maxflushes = Math.max(min_flush_threshold,
+              size * flush_interval * flush_speed / Const.MAX_TIMESPAN);
+
+            flush(now / 1000 - Const.MAX_TIMESPAN - 1, maxflushes);
+       
+          }
+        ....
+        try {
+          Thread.sleep(flush_interval * 1000);
+        } catch (InterruptedException e) {
+          LOG.error("Compaction thread interrupted, doing one last flush", e);
+          flush();
+          return;
+        }
+      }
+    }
+  }
+```
+
+
+
+```
+private Deferred<ArrayList<Object>> flush(final long cut_off, int maxflushes) {
+	
+  ......
+  int seed = (int) (System.nanoTime() % 3);
+	...
+    final long base_time = Bytes.getUnsignedInt(row,
+        Const.SALT_WIDTH() + metric_width);
+    if (base_time > cut_off) {
+     //当前小时的数据不compact
+      break;
+    }else{
+        ......
+    } 
+    ds.add(tsdb.get(row).addCallbacks(compactcb, handle_read_error));
+  }
+  
+  final Deferred<ArrayList<Object>> group = Deferred.group(ds);
+  
+  //循环Flush.....
+  if (nflushes == max_concurrent_flushes && maxflushes > 0) {
+    // We're not done yet.  Once this group of flushes completes, we need
+    // to kick off more.
+    tsdb.getClient().flush();  // Speed up this batch by telling the client to flush.
+    final int maxflushez = maxflushes;  // Make it final for closure.
+    final class FlushMoreCB implements Callback<Deferred<ArrayList<Object>>,
+                                                ArrayList<Object>> {
+      @Override
+      public Deferred<ArrayList<Object>> call(final ArrayList<Object> arg) {
+        return flush(cut_off, maxflushez);
+      }
+      @Override
+      public String toString() {
+        return "Continue flushing with cut_off=" + cut_off
+          + ", maxflushes=" + maxflushez;
+      }
+    }
+    group.addCallbackDeferring(new FlushMoreCB());
+  }
+  return group;
+}
+```
+
+```
+private final class CompactCB implements Callback<Object, ArrayList<KeyValue>> {
+  @Override
+  public Object call(final ArrayList<KeyValue> row) {
+    return compact(row, null, null, null);
+  }
+  @Override
+  public String toString() {
+    return "compact";
+  }
+}
+```
+
+compact函数：
+
+```
+Deferred<Object> compact(final ArrayList<KeyValue> row,
+    final KeyValue[] compacted,
+    List<Annotation> annotations,
+    List<HistogramDataPoint> histograms) {
+  return new Compaction(row, compacted, annotations, histograms).compact();
+}
+
+```
+
+## 数据压缩：
+
+
+
+
+
+简单理解为：同一个小时的KeyValue，按照时间戳排好序，放到一个有衔接队列里面，不断的取出数据，合并到一个Qualifier和Vaule里面去。最后把Qualifier组装成Vaule写回到Hbase里面去。如果是秒和毫秒混合，也会设置一个flag。
+
+net.opentsdb.core.CompactionQueue.Compaction#compact
+
+qualifier_offset作为指针，遍历KeyValue里面的数据
+
+> ColumnDatapointIterator
+
+```
+public ColumnDatapointIterator(final KeyValue kv) {
+  this.column_timestamp = kv.timestamp();
+  this.qualifier = kv.qualifier();
+  this.value = kv.value();
+  qualifier_offset = 0;
+  value_offset = 0;
+  checkForFixup();
+  update();
+}
+
+
+private boolean update() {
+    if (qualifier_offset >= qualifier.length || value_offset >= value.length) {
+      return false;
+    }
+    if (Internal.inMilliseconds(qualifier[qualifier_offset])) {
+      current_qual_length = 4;
+      is_ms = true;
+    } else {
+      current_qual_length = 2;
+      is_ms = false;
+    }
+    current_timestamp_offset = Internal.getOffsetFromQualifier(qualifier, qualifier_offset);
+    current_val_length = Internal.getValueLengthFromQualifier(qualifier, qualifier_offset);
+    return true;
+  }
+  
+  比较器：比较Qualfier时间戳，如果时间戳相同，比较Cell的时间戳：）
+    @Override
+  public int compareTo(ColumnDatapointIterator o) {
+    int c = current_timestamp_offset - o.current_timestamp_offset;
+    if (c == 0) {
+      // note inverse order of comparison!
+      c = Long.signum(o.column_timestamp - column_timestamp);
+    }
+    return c;
+  }
+```
+
+buildHeapProcessAnnotations
+
+就是把一个个的KeyValue封装成ColumnDatapointIterator，放到一个优先级队列里面去；提供便利的数据访问功能和排序功能；
+
+这里注意一点：compactedKVTimestamp，这里是把KeyValue里面最大的那个时间戳作为合并后的时间戳。
+
+合并的逻辑：不断的从ColumnDatapointIterator取出数据，如果存在时间戳重复的，根据tsdb.config.use_max_value()来选择一个最大值或者最小值；
+
+最主要的时候函数writeToBuffersFromOffset，一旦判断某个DataPoint需要合并，那么就把qual和value写到一个总的byte数组里面去；每个合适的都封装成一个BufferSegment，然后统一写到byte数组里面去。
+
+最后生成一个KeyValue，写入到Hbase，并且删除已有的数据。
+
+
+
+```
+public Deferred<Object> compact() {
+  // no columns in row, nothing to do
+  if (nkvs == 0) {
+    return null;
+  }
+
+  //1.数据排序
+  compactedKVTimestamp = Long.MIN_VALUE;
+  // go through all the columns, process annotations, and
+  heap = new PriorityQueue<ColumnDatapointIterator>(nkvs);
+  int tot_values = buildHeapProcessAnnotations();
+
+  // if there are no datapoints or only one that needs no fixup, we are done
+  if (noMergesOrFixups()) {
+    // return the single non-annotation entry if requested
+    if (compacted != null && heap.size() == 1) {
+      compacted[0] = findFirstDatapointColumn();
+    }
+    return null;
+  }
+
+  // merge the datapoints, ordered by timestamp and removing duplicates
+  final ByteBufferList compacted_qual = new ByteBufferList(tot_values);
+  final ByteBufferList compacted_val = new ByteBufferList(tot_values);
+  compaction_count.incrementAndGet();
+  
+  2.合并数据，合并为一个qual和value
+  mergeDatapoints(compacted_qual, compacted_val);
+
+  // if we wound up with no data in the compacted column, we are done
+  if (compacted_qual.segmentCount() == 0) {
+    return null;
+  }
+
+  // build the compacted columns
+  final KeyValue compact = buildCompactedColumn(compacted_qual, compacted_val);
+
+  final boolean write = updateDeletesCheckForWrite(compact);
+
+  if (compacted != null) {  // Caller is interested in the compacted form.
+    compacted[0] = compact;
+    final long base_time = Bytes.getUnsignedInt(compact.key(),
+        Const.SALT_WIDTH() + metric_width);
+    final long cut_off = System.currentTimeMillis() / 1000
+        - Const.MAX_TIMESPAN - 1;
+    if (base_time > cut_off) {  // If row is too recent...
+      return null;              // ... Don't write back compacted.
+    }
+  }
+  // if compactions aren't enabled or there is nothing to write, we're done
+  if (!tsdb.config.enable_compactions() || (!write && to_delete.isEmpty())) {
+    return null;
+  }
+
+  final byte[] key = compact.key();
+  //LOG.debug("Compacting row " + Arrays.toString(key));
+  deleted_cells.addAndGet(to_delete.size());  // We're going to delete this.
+  if (write) {
+    written_cells.incrementAndGet();
+    Deferred<Object> deferred = tsdb.put(key, compact.qualifier(), compact.value(), compactedKVTimestamp);
+    if (!to_delete.isEmpty()) {
+      deferred = deferred.addCallbacks(new DeleteCompactedCB(to_delete), handle_write_error);
+    }
+    return deferred;
+  } else if (last_append_column == null) {
+    // We had nothing to write, because one of the cells is already the
+    // correctly compacted version, so we can go ahead and delete the
+    // individual cells directly.
+    new DeleteCompactedCB(to_delete).call(null);
+    return null;
+  } else {
+    return null;
+  }
+}
+
+
+
+private int buildHeapProcessAnnotations() {
+  int tot_values = 0;
+
+  for (final KeyValue kv : row) {
+    byte[] qual = kv.qualifier();
+    int len = qual.length;
+    ......其他类型的KeyValue的处理
+    // estimate number of points based on the size of the first entry
+    // in the column; if ms/sec datapoints are mixed, this will be
+    // incorrect, which will cost a reallocation/copy
+    final int entry_size = Internal.inMilliseconds(qual) ? 4 : 2;
+    tot_values += (len + entry_size - 1) / entry_size;
+    if (longest == null || longest.qualifier().length < kv.qualifier().length) {
+      longest = kv;
+    }
+    //封装KeyValue
+    ColumnDatapointIterator col = new ColumnDatapointIterator(kv);
+    compactedKVTimestamp = Math.max(compactedKVTimestamp, kv.timestamp());
+    if (col.hasMoreData()) {
+      heap.add(col);
+    }
+    to_delete.add(kv);
+  }
+  return tot_values;
+}
+```
+
+```
+dtcsMergeDataPoints和defaultMergeDataPoints两个处理的数据不同，一个是处理使用dp的时间戳作为hbase的时间戳，一个是使用系统时间作为时间戳。两者处理重复数据的逻辑不同，前者是根据配置使用最大值或者最小者；后者是根据是否修复配置，如果修复，则默认使用第一个读取到的值，应该也是随机的！
+
+//dtsc:Data Transmission and Control System
+private void dtcsMergeDataPoints(ByteBufferList compacted_qual, ByteBufferList compacted_val) {
+  // Compare timestamps for two KeyValues at the same time,
+  // if they are same compare their values
+  // Return maximum or minimum value depending upon tsd.storage.use_max_value parameter
+  // This function is called once for every RowKey,
+  // so we only care about comparing offsets, which
+  // are a part of column qualifier
+  ColumnDatapointIterator col1 = null;
+  ColumnDatapointIterator col2 = null;
+  while (!heap.isEmpty()) {
+    col1 = heap.remove();
+    Pair<Integer, Integer> offsets = col1.getOffsets();
+    Pair<Integer, Integer> offsetLengths = col1.getOffsetLengths();
+    int ts1 = col1.getTimestampOffsetMs();
+    double val1 = col1.getCellValueAsDouble();
+    if (col1.advance()) {
+      heap.add(col1);
+    }
+    int ts2 = ts1;
+    while (ts1 == ts2) {
+      col2 = heap.peek();
+      ts2 = col2 != null ? col2.getTimestampOffsetMs() : ts2;
+      if (col2 == null || ts1 != ts2)
+        break;
+      double val2 = col2.getCellValueAsDouble();
+      if ((tsdb.config.use_max_value() && val2 > val1) || (!tsdb.config.use_max_value() && val1 > val2)) {
+        // Reduce copying of byte arrays by just using col1 variable to reference to either max or min KeyValue
+        col1 = col2;
+        val1 = val2;
+        offsets = col2.getOffsets();
+        offsetLengths = col2.getOffsetLengths();
+      }
+      heap.remove();
+      if (col2.advance()) {
+        heap.add(col2);
+      }
+    }
+    //？？我怎么觉得这里和writeToBuffers是一样的呢？
+    col1.writeToBuffersFromOffset(compacted_qual, compacted_val, offsets, offsetLengths);
+    ms_in_row |= col1.isMilliseconds();
+    s_in_row |= !col1.isMilliseconds();
+  }
+}
+
+分析：
+-----------------------------
+因为并不是col1对象使用col2的offset，而是col1=col2，再使用col2的offsets，所以感觉两个结果是一样的；
+  public Pair<Integer, Integer> getOffsets() {
+	return new Pair<Integer, Integer>(qualifier_offset, value_offset);
+  }
+
+  public Pair<Integer, Integer> getOffsetLengths() {
+	return new Pair<Integer, Integer>(current_qual_length, current_val_length);
+  }
+    public void writeToBuffers(ByteBufferList compQualifier, ByteBufferList compValue) {
+    compQualifier.add(qualifier, qualifier_offset, current_qual_length);
+    compValue.add(value, value_offset, current_val_length);
+  }
+
+  public void writeToBuffersFromOffset(ByteBufferList compQualifier, ByteBufferList compValue, Pair<Integer, Integer> offsets, Pair<Integer, Integer> offsetLengths) {
+    compQualifier.add(qualifier, offsets.getKey(), offsetLengths.getKey());
+	compValue.add(value, offsets.getValue(), offsetLengths.getValue());
+  }
+  ------------------------------------------
+
+private void defaultMergeDataPoints(ByteBufferList compacted_qual,
+        ByteBufferList compacted_val) {
+  int prevTs = -1;
+  while (!heap.isEmpty()) {
+    final ColumnDatapointIterator col = heap.remove();
+    final int ts = col.getTimestampOffsetMs();
+    if (ts == prevTs) {
+      // check to see if it is a complete duplicate, or if the value changed
+      final byte[] existingVal = compacted_val.getLastSegment();
+      final byte[] discardedVal = col.getCopyOfCurrentValue();
+      if (!Arrays.equals(existingVal, discardedVal)) {
+        duplicates_different.incrementAndGet();
+        if (!tsdb.config.fix_duplicates()) {
+          throw new IllegalDataException("Duplicate timestamp for key="
+              + Arrays.toString(row.get(0).key()) + ", ms_offset=" + ts + ", older="
+              + Arrays.toString(existingVal) + ", newer=" + Arrays.toString(discardedVal)
+              + "; set tsd.storage.fix_duplicates=true to fix automatically or run Fsck");
+        }
+        LOG.warn("Duplicate timestamp for key=" + Arrays.toString(row.get(0).key())
+            + ", ms_offset=" + ts + ", kept=" + Arrays.toString(existingVal) + ", discarded="
+            + Arrays.toString(discardedVal));
+      } else {
+        duplicates_same.incrementAndGet();
+      }
+    } else {
+      prevTs = ts;
+      col.writeToBuffers(compacted_qual, compacted_val);
+      ms_in_row |= col.isMilliseconds();
+      s_in_row |= !col.isMilliseconds();
+    }
+    if (col.advance()) {
+      // there is still more data in this column, so add it back to the heap
+      heap.add(col);
+    }
+  }
+}
+
+
+private KeyValue buildCompactedColumn(ByteBufferList compacted_qual,
+        ByteBufferList compacted_val) {
+      // metadata is a single byte for a multi-value column, otherwise nothing
+      final int metadata_length = compacted_val.segmentCount() > 1 ? 1 : 0;
+      final byte[] cq = compacted_qual.toBytes(0);
+      final byte[] cv = compacted_val.toBytes(metadata_length);
+
+      // add the metadata flag, which right now only includes whether we mix s/ms datapoints
+      if (metadata_length > 0) {
+        byte metadata_flag = 0;
+        if (ms_in_row && s_in_row) {
+          metadata_flag |= Const.MS_MIXED_COMPACT;
+        }
+        cv[cv.length - 1] = metadata_flag;
+      }
+
+      final KeyValue first = row.get(0);
+      if(tsdb.getConfig().getBoolean("tsd.storage.use_otsdb_timestamp")) {
+        return new KeyValue(first.key(), first.family(), cq, compactedKVTimestamp, cv);
+      } else {
+        return new KeyValue(first.key(), first.family(), cq, cv);
+      }
+    }
+```
+
+
+
+# 7.批量数据的导入
+
+和put类似，但是
+
+1.没有写meta
+
+2.禁用了WAL，
+
+所以这里如果使用HbaseReplicaiton作备份的话，还得注意一下这一点
+
+# 8.其他功能：
 
 ## 限流
 
@@ -3923,5 +5711,9 @@ net.opentsdb.core.TSDB#TSDB(org.hbase.async.HBaseClient, net.opentsdb.utils.Conf
 query_limits = new QueryLimitOverride(this);
 ```
 
-## 
+待看。
+
+其实Tsdb的限流导出都有，什么最大返回dps啊，最大字节数啊等
+
+
 
