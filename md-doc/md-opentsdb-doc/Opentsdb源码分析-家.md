@@ -79,7 +79,7 @@ addPointInternal：
 
 4.float类型的数值，会通过如下变为int类型的表示：
 
-​	Bytes.fromInt(Float.floatToRawIntBits(value))
+	Bytes.fromInt(Float.floatToRawIntBits(value))
 
 ```
 final Deferred<Object> addPointInternal(final String metric,
@@ -4351,7 +4351,7 @@ public static Scanner getMetricScanner(final TSDB tsdb, final int salt_bucket,
 
   10行这里忽略了metrics，因为这个在前面设置rowkey的start和end的时候已经设置好了。
 
-  
+
 
   主要看看正则表达式：
 
@@ -4359,7 +4359,7 @@ public static Scanner getMetricScanner(final TSDB tsdb, final int salt_bucket,
 
   `(?:)` creates a *non-capturing group*. It groups things together without creating a backreference. 
 
-  
+
 
   | [Positive lookahead](https://www.regular-expressions.info/lookaround.html) | `(?=regex)` | Matches at a position where the pattern inside the lookahead can be matched. Matches only the position. It does not consume any characters or expand the match. In a pattern like `one(?=two)three`, both `two` and `three` have to match at the position where the match of `one` ends. | `t(?=s)` matches the second `t`in `streets`. | YES  | YES  |
   | ------------------------------------------------------------ | ----------- | ------------------------------------------------------------ | -------------------------------------------- | ---- | ---- |
@@ -4384,7 +4384,6 @@ public static Scanner getMetricScanner(final TSDB tsdb, final int salt_bucket,
 
   \Q和\E之间的内容表示引用QUote，引用就是不代表特殊含义，里面的仅仅是数据而已。
 
-  
 ```
 public static String getRowKeyTSUIDRegex(final List<String> tsuids) {
   Collections.sort(tsuids);
@@ -5700,6 +5699,291 @@ private KeyValue buildCompactedColumn(ByteBufferList compacted_qual,
 2.禁用了WAL，
 
 所以这里如果使用HbaseReplicaiton作备份的话，还得注意一下这一点
+
+# 8.Annonation:
+
+## qualifier:
+
+net.opentsdb.meta.Annotation#getGlobalAnnotations
+
+```
+if ((column.qualifier().length == 3 || column.qualifier().length == 5)
+    && column.qualifier()[0] == PREFIX()) {
+```
+
+
+
+```
+/** Byte used for the qualifier prefix to indicate this is an annotation */
+private static final byte PREFIX = 0x01;
+```
+
+qualifier为3，或者为5，或者=0x01都是Annotation如果为秒，就是3个字节，如果为毫秒，就是5个字节。
+
+net.opentsdb.meta.Annotation#getQualifier，秒一般是2个字节标识，毫秒是4个字节表示，第一个字节加上0x01，表示是Annotation
+
+```
+private static byte[] getQualifier(final long start_time) {
+  if (start_time < 1) {
+    throw new IllegalArgumentException("The start timestamp has not been set");
+  }
+  
+  final long base_time;
+  final byte[] qualifier;
+  long timestamp = start_time;
+  // downsample to seconds to save space AND prevent duplicates if the time
+  // is on a second boundary (e.g. if someone posts at 1328140800 with value A 
+  // and 1328140800000L with value B)
+  if (timestamp % 1000 == 0) {
+    timestamp = timestamp / 1000;
+  }
+  
+  if ((timestamp & Const.SECOND_MASK) != 0) {
+    // drop the ms timestamp to seconds to calculate the base timestamp
+    base_time = ((timestamp / 1000) - 
+        ((timestamp / 1000) % Const.MAX_TIMESPAN));
+    qualifier = new byte[5];
+    final int offset = (int) (timestamp - (base_time * 1000));
+    System.arraycopy(Bytes.fromInt(offset), 0, qualifier, 1, 4);
+  } else {
+    base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
+    qualifier = new byte[3];
+    final short offset = (short) (timestamp - base_time);
+    System.arraycopy(Bytes.fromShort(offset), 0, qualifier, 1, 2);
+  }
+  qualifier[0] = PREFIX;
+  return qualifier;
+}
+```
+
+
+
+HTTP请求里面，可以是：
+
+- /api/annotation/bulk
+
+- /api/annotation
+
+- /api/annotation
+
+  第二个只根据开始时间获取 \0x000000 timestamp qualifier=offset的Annotation，new一个Get请求
+
+  第三个如果没有结束时间，就把结束时间取系统时间，setStartKey和StopKey，取出所有的qualfier，在判断qualifier是不是注释，这样很浪费流量啊！（批量加载不能只加载某个qualifier？）
+
+  ## 单条读取：
+
+  ```
+  public static Deferred<Annotation> getAnnotation(final TSDB tsdb, 
+      final byte[] tsuid, final long start_time) {
+    
+    /**
+     * Called after executing the GetRequest to parse the meta data.
+     */
+    final class GetCB implements Callback<Deferred<Annotation>, 
+      ArrayList<KeyValue>> {
+  
+      /**
+       * @return Null if the meta did not exist or a valid Annotation object if 
+       * it did.
+       */
+      @Override
+      public Deferred<Annotation> call(final ArrayList<KeyValue> row) 
+        throws Exception {
+        if (row == null || row.isEmpty()) {
+          return Deferred.fromResult(null);
+        }
+        
+        Annotation note = JSON.parseToObject(row.get(0).value(),
+            Annotation.class);
+        return Deferred.fromResult(note);
+      }
+      
+    }
+  
+    final GetRequest get = new GetRequest(tsdb.dataTable(), 
+        getRowKey(start_time, tsuid));
+    get.family(FAMILY);
+    get.qualifier(getQualifier(start_time));
+    return tsdb.getClient().get(get).addCallbackDeferring(new GetCB());    
+  }
+  ```
+
+
+## 批量读取
+
+```
+/**
+   * Scanner that loops through the [0, 0, 0, timestamp] rows looking for
+   * global annotations. Returns a list of parsed annotation objects.
+   * The list may be empty.
+   */
+  final class ScannerCB implements Callback<Deferred<List<Annotation>>, 
+    ArrayList<ArrayList<KeyValue>>> {
+    final Scanner scanner;
+    final ArrayList<Annotation> annotations = new ArrayList<Annotation>();
+    
+    /**
+     * Initializes the scanner
+     */
+    public ScannerCB() {
+      final byte[] start = new byte[Const.SALT_WIDTH() + 
+                                    TSDB.metrics_width() + 
+                                    Const.TIMESTAMP_BYTES];
+      final byte[] end = new byte[Const.SALT_WIDTH() + 
+                                  TSDB.metrics_width() + 
+                                  Const.TIMESTAMP_BYTES];
+      
+      final long normalized_start = (start_time - 
+          (start_time % Const.MAX_TIMESPAN));
+      final long normalized_end = (end_time - 
+          (end_time % Const.MAX_TIMESPAN) + Const.MAX_TIMESPAN);
+      
+      Bytes.setInt(start, (int) normalized_start, 
+          Const.SALT_WIDTH() + TSDB.metrics_width());
+      Bytes.setInt(end, (int) normalized_end, 
+          Const.SALT_WIDTH() + TSDB.metrics_width());
+
+      scanner = tsdb.getClient().newScanner(tsdb.dataTable());
+      scanner.setStartKey(start);
+      scanner.setStopKey(end);
+      scanner.setFamily(FAMILY);
+    }
+    
+    public Deferred<List<Annotation>> scan() {
+      return scanner.nextRows().addCallbackDeferring(this);
+    }
+    
+    @Override
+    public Deferred<List<Annotation>> call (
+        final ArrayList<ArrayList<KeyValue>> rows) throws Exception {
+      if (rows == null || rows.isEmpty()) {
+        return Deferred.fromResult((List<Annotation>)annotations);
+      }
+      
+      for (final ArrayList<KeyValue> row : rows) {
+        for (KeyValue column : row) {
+          if ((column.qualifier().length == 3 || column.qualifier().length == 5) 
+              && column.qualifier()[0] == PREFIX()) {
+            Annotation note = JSON.parseToObject(column.value(),
+                Annotation.class);
+            if (note.start_time < start_time || note.end_time > end_time) {
+              continue;
+            }
+            annotations.add(note);
+          }
+        }
+      }
+      
+      return scan();
+    }
+    
+  }
+
+  return new ScannerCB().scan();
+}
+```
+
+## 删除：
+
+直接一个请求
+
+```
+public Deferred<Object> delete(final TSDB tsdb) {
+  if (start_time < 1) {
+    throw new IllegalArgumentException("The start timestamp has not been set");
+  }
+  
+  final byte[] tsuid_byte = tsuid != null && !tsuid.isEmpty() ? 
+      UniqueId.stringToUid(tsuid) : null;
+  final DeleteRequest delete = new DeleteRequest(tsdb.dataTable(), 
+      getRowKey(start_time, tsuid_byte), FAMILY, 
+      getQualifier(start_time));
+  return tsdb.getClient().delete(delete);
+}
+```
+
+## 批量删除：
+
+tsdb的批量操作都是先scan再一条一条delete
+
+```
+/**
+   * Iterates through the scanner results in an asynchronous manner, returning
+   * once the scanner returns a null result set.
+   */
+  final class ScannerCB implements Callback<Deferred<List<Deferred<Object>>>, 
+      ArrayList<ArrayList<KeyValue>>> {
+    final Scanner scanner;
+
+    public ScannerCB() {
+      scanner = tsdb.getClient().newScanner(tsdb.dataTable());
+      scanner.setStartKey(start_row);
+      scanner.setStopKey(end_row);
+      scanner.setFamily(FAMILY);
+      if (tsuid != null) {
+        final List<String> tsuids = new ArrayList<String>(1);
+        tsuids.add(UniqueId.uidToString(tsuid));
+        Internal.createAndSetTSUIDFilter(scanner, tsuids);
+      }
+    }
+    
+    public Deferred<List<Deferred<Object>>> scan() {
+      return scanner.nextRows().addCallbackDeferring(this);
+    }
+    
+    @Override
+    public Deferred<List<Deferred<Object>>> call (
+        final ArrayList<ArrayList<KeyValue>> rows) throws Exception {
+      if (rows == null || rows.isEmpty()) {
+        return Deferred.fromResult(delete_requests);
+      }
+      
+      for (final ArrayList<KeyValue> row : rows) {
+        final long base_time = Internal.baseTime(tsdb, row.get(0).key());
+        for (KeyValue column : row) {
+          if ((column.qualifier().length == 3 || column.qualifier().length == 5)
+              && column.qualifier()[0] == PREFIX()) {
+            final long timestamp = timeFromQualifier(column.qualifier(), 
+                base_time);
+            if (timestamp < start_time || timestamp > end_time) {
+              continue;
+            }
+            final DeleteRequest delete = new DeleteRequest(tsdb.dataTable(), 
+                column.key(), FAMILY, column.qualifier());
+            delete_requests.add(tsdb.getClient().delete(delete));
+          }
+        }
+      }
+      return scan();
+    }
+  }
+
+  /** Called when the scanner is done. Delete requests may still be pending */
+  final class ScannerDoneCB implements Callback<Deferred<ArrayList<Object>>, 
+    List<Deferred<Object>>> {
+    @Override
+    public Deferred<ArrayList<Object>> call(final List<Deferred<Object>> deletes)
+        throws Exception {
+      return Deferred.group(delete_requests);
+    }
+  }
+  
+  /** Waits on the group of deferreds to complete before returning the count */
+  final class GroupCB implements Callback<Deferred<Integer>, ArrayList<Object>> {
+    @Override
+    public Deferred<Integer> call(final ArrayList<Object> deletes)
+        throws Exception {
+      return Deferred.fromResult(deletes.size());
+    }
+  }
+  
+  Deferred<ArrayList<Object>> scanner_done = new ScannerCB().scan()
+      .addCallbackDeferring(new ScannerDoneCB());
+  return scanner_done.addCallbackDeferring(new GroupCB());
+}
+```
+
+
 
 # 8.其他功能：
 
