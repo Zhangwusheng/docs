@@ -1,3 +1,25 @@
+net.opentsdb.tsd.RpcManager#initializeBuiltinRpcs
+
+```
+if (enableApi) {
+  http.put("api/aggregators", aggregators);
+  http.put("api/annotation", annotation_rpc);
+  http.put("api/annotations", annotation_rpc);
+  http.put("api/config", new ShowConfig());
+  http.put("api/dropcaches", dropcaches);
+  http.put("api/query", new QueryRpc());
+  http.put("api/search", new SearchRpc());
+  http.put("api/serializers", new Serializers());
+  http.put("api/stats", stats);
+  http.put("api/suggest", suggest_rpc);
+  http.put("api/tree", new TreeRpc());
+  http.put("api/uid", new UniqueIdRpc());
+  http.put("api/version", version);
+}
+```
+
+
+
 # 1.写流程
 
 ## 请求的解析
