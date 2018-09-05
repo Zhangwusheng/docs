@@ -1,3 +1,34 @@
+
+
+
+
+标签个数限制：
+
+本身不加限制，但是实施时最好加上。
+
+```
+if (config.hasProperty("tsd.storage.max_tags")) {
+  Const.setMaxNumTags(config.getShort("tsd.storage.max_tags"));
+}
+```
+
+```
+/**
+ * -------------- WARNING ----------------
+ * Package private method to override the maximum number of tags.
+ * 8 is an aggressive limit on purpose to avoid performance issues.
+ * @param tags The number of tags to allow
+ * @throws IllegalArgumentException if the number of tags is less
+ * than 1 (OpenTSDB requires at least one tag per metric).
+ */
+static void setMaxNumTags(final short tags) {
+  if (tags < 1) {
+    throw new IllegalArgumentException("tsd.storage.max_tags must be greater than 0");
+  }
+  MAX_NUM_TAGS = tags;
+}
+```
+
 # 1.写流程
 
 ## 请求的解析
@@ -5703,6 +5734,12 @@ private KeyValue buildCompactedColumn(ByteBufferList compacted_qual,
 
 # 8.其他功能：
 
+## 插件的编写：
+
+2.4RC2 UniqueIdWhitelistFilter可以作为参考
+
+Tsdb3.0 有很多插件，可以参考
+
 ## 限流
 
 net.opentsdb.core.TSDB#TSDB(org.hbase.async.HBaseClient, net.opentsdb.utils.Config)
@@ -5713,7 +5750,7 @@ query_limits = new QueryLimitOverride(this);
 
 待看。
 
-其实Tsdb的限流导出都有，什么最大返回dps啊，最大字节数啊等
+其实Tsdb的限流还有很多细节，什么最大返回dps啊，最大字节数啊等
 
 
 
