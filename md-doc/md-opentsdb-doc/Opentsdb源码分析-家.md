@@ -1253,7 +1253,7 @@ public abstract Deferred<Boolean> match(final Map<String, String> tags);
   }
 ```
 
-# 4.Opentsdb 请求解析
+# 4.查询请求解析
 
 ## 4.1 Opentsdb 查询时间解析
 
@@ -2091,7 +2091,7 @@ public void validateAndSetQuery() {
 }
 ```
 
-# 5.Opentsdb 查询执行
+# 5. 查询执行
 
 查询的执行顺序：解析请求->异步执行->数据处理->格式化
 
