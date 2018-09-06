@@ -104,7 +104,7 @@ OpenTSDB分配UID时遵循如下规则：
 >  \x00                                      column=id:tagk, timestamp=1529652270537, value=\x00\x00\x00\x00\x00\x00\x00\x0A                                             
 >  \x00                                      column=id:tagv, timestamp=1530288910343, value=\x00\x00\x00\x00\x00\x00\x00\x12    
 >
-> ​                                                                                                                                              \x00\x00\x01                              column=name:metrics, timestamp=1528879705241, value=sys.cpu.user                                                             \x00\x00\x01                              column=name:tagk, timestamp=1528879705280, value=host                                                                        \x00\x00\x01                              column=name:tagv, timestamp=1528879705313, value=web01                                                                       \x00\x00\x02                              column=name:metrics, timestamp=1528880100259, value=sys.cpu.sys                                                              \x00\x00\x02                              column=name:tagk, timestamp=1528879705347, value=user                                                                        \x00\x00\x02                              column=name:tagv, timestamp=1528879705377, value=10001                                                                       
+>                                                                                                                                               \x00\x00\x01                              column=name:metrics, timestamp=1528879705241, value=sys.cpu.user                                                             \x00\x00\x01                              column=name:tagk, timestamp=1528879705280, value=host                                                                        \x00\x00\x01                              column=name:tagv, timestamp=1528879705313, value=web01                                                                       \x00\x00\x02                              column=name:metrics, timestamp=1528880100259, value=sys.cpu.sys                                                              \x00\x00\x02                              column=name:tagk, timestamp=1528879705347, value=user                                                                        \x00\x00\x02                              column=name:tagv, timestamp=1528879705377, value=10001                                                                       
 >
 > 10001                                     column=id:tagv, timestamp=1528879705387, value=\x00\x00\x02                                                                  host                                      column=id:tagk, timestamp=1528879705287, value=\x00\x00\x01                                                                  sys.cpu.sys                               column=id:metrics, timestamp=1528880100264, value=\x00\x00\x02                                                               sys.cpu.user                              column=id:metrics, timestamp=1528879705251, value=\x00\x00\x01                                                               user                                      column=id:tagk, timestamp=1528879705356, value=\x00\x00\x02                                                                  web01                                     column=id:tagv, timestamp=1528879705321, value=\x00\x00\x01                                                                  
 
@@ -477,11 +477,11 @@ metrics数据的HBase RowKey中包含主要组成部分为：盐值（Salt）、
 
 rowkey的格式：
 
-​	salt值（可配置）+3字节metrics +4字节整点时间戳+N*(3字节tagk编码+3字节tagv编码)
+	salt值（可配置）+3字节metrics +4字节整点时间戳+N*(3字节tagk编码+3字节tagv编码)
 
 值：
 
-​	分为float和long类型，数据类型通过设置到qualifier里面的flags来区分。
+	分为float和long类型，数据类型通过设置到qualifier里面的flags来区分。
 
  
 
@@ -852,13 +852,9 @@ final void scheduleForCompaction(final byte[] row, final int base_time) {
 
 
 
-# 3.查询涉及到的对象以及包含关系
+# 3.查询涉及到的对象
 
-
-
-HttpQUery------>^1^TSQuery
-
-## 2.1查询对象
+## 3.1查询对象
 
 > net.opentsdb.core.TSQuery
 >
@@ -964,7 +960,7 @@ POST格式的示例数据为：（可以根据上面的增加自己需要的设�
 
 
 
-## 2.2子查询对象
+## 3.2子查询对象
 
 net.opentsdb.core.TSSubQuery
 
@@ -1007,7 +1003,7 @@ public final class TSSubQuery {
   private int index;
 ```
 
-## 2.3过滤器
+## 3.3过滤器
 
 > net.opentsdb.query.filter.TagVFilter
 >
@@ -1163,7 +1159,7 @@ public int compareTo(final TagVFilter filter) {
 public abstract Deferred<Boolean> match(final Map<String, String> tags);
 ```
 
-## 2.4降采样规格
+## 3.4降采样规格
 
 
 
@@ -1257,7 +1253,7 @@ public abstract Deferred<Boolean> match(final Map<String, String> tags);
 
 # 4.Opentsdb 请求解析
 
-## Opentsdb 查询时间解析
+## 4.1 Opentsdb 查询时间解析
 
 
 
@@ -1488,7 +1484,7 @@ public static final long parseDuration(final String duration) {
 }
 ```
 
-## Opentsdb 查询解析
+## 4.2 Opentsdb 查询解析
 
 > 类：net.opentsdb.tsd.QueryRpc
 >
@@ -1527,7 +1523,7 @@ if (query.method() == HttpMethod.POST) {
 
 ### 反序列化
 
-
+### 
 
 #### POST：
 
@@ -2052,7 +2048,7 @@ public static void mapToFilters(final Map<String, String> map,
 
 
 
-#### 序列化后的校验和后处理
+### 序列化后的校验和后处理
 
 > net.opentsdb.core.TSSubQuery#validateAndSetQuery
 
@@ -2097,7 +2093,7 @@ public void validateAndSetQuery() {
 
 查询的执行顺序：解析请求->异步执行->数据处理->格式化
 
-## 1. 查询数据的处理顺序
+## 5.1. 查询数据的处理顺序
 
 - Filtering
 - Grouping
@@ -2108,7 +2104,7 @@ public void validateAndSetQuery() {
 - Functions
 - Expressions
 
-## 2. 针对异常的处理：
+## 5.2. 针对异常的处理：
 
 > net.opentsdb.tsd.QueryRpc#handleQuery
 
@@ -2169,7 +2165,7 @@ class ErrorCB implements Callback<Object, Exception> {
 }
 ```
 
-## 3.数据结构以及数据组织：
+## 5.3.数据结构以及数据组织：
 
 #### DataPoint
 
@@ -2609,13 +2605,9 @@ void setRow(final KeyValue row) {
 
 
 
-##### RowSeq疑问：
+##### RowSeq疑问
 
 读取qualifer和value都是直接读取的字节值，没有判断是不是Compact的。合并之后的也是合并了很多的字节，在这里是不断的增加indx指针来实现对compact的数据的读取的！
-
-
-
-这里看不出合并后的数据怎么读取的，需要结合compact的代码！
 
 ```
 /**
@@ -3309,7 +3301,7 @@ SpanGroup代表了不同的时间线的数据！
 
 
 
-##### 疑问：
+##### 疑问
 
 这里的spans是不是排序的还不知道！（看后面mergeDataPoints是不排序的）
 
@@ -4028,7 +4020,7 @@ public double nextDoubleValue() {
 
 
 
-## 代码执行顺序：
+## 5.4 代码执行顺序：
 
 Annotation.getGlobalAnnotations->==GlobalCB==->net.opentsdb.core.TSQuery#buildQueriesAsync->==BuildCB==->query.runAsync->==QueriesCB==->SendIt,所有的操作都是使用ErrorCB作为错误处理机制。
 
@@ -4042,7 +4034,7 @@ BuildCB：net.opentsdb.core.TsdbQuery#runAsync -> GroupByAndAggregateCB->返回�
 
 子查询：net.opentsdb.core.TsdbQuery#runAsync ->  net.opentsdb.core.SaltScanner#scan -> net.opentsdb.core.SaltScanner#scan（CallBack）-> 处理数据
 
-## 第一步：加载Annotation
+## 5.5第一步：加载Annotation
 
 > net.opentsdb.meta.Annotation#getGlobalAnnotations
 
@@ -4193,7 +4185,7 @@ class GlobalCB implements Callback<Object, List<Annotation>> {
 
 
 
-## 第二步：查询解析
+## 5.6第二步：查询解析
 
 ### 总体流程
 
@@ -4514,7 +4506,7 @@ private void findGroupBys() {
 
 这时候继续回到net.opentsdb.tsd.QueryRpc的handleQuery里面，可以看到，查询对象都准备好了，这时候会执行BuildCB，意思就是每个子查询都Build好了，可以执行了。
 
-## 第三步：查询执行
+## 5.7第三步：查询执行
 
 ```java
 class BuildCB implements Callback<Deferred<Object>, Query[]> {
@@ -4567,7 +4559,7 @@ public Deferred<DataPoints[]> runAsync() throws HBaseException {
 
 
 
-##### Salt的计算：
+##### Salt的计算
 
 Salt Width最大为8个字节，可配置。
 
@@ -5542,7 +5534,7 @@ return groups.values().toArray(new SpanGroup[groups.size()]);
 
 # 6.Compact的实现
 
-## 压缩相关配置默认值;
+## 压缩相关配置默认值
 
 ```
 
@@ -5562,7 +5554,7 @@ default_map.put("tsd.storage.compaction.flush_speed", "2");
 
 
 
-## 基本流程：
+## 基本流程
 
 CompactionQueue开启单独的线程进行压缩：
 
@@ -5713,7 +5705,7 @@ Deferred<Object> compact(final ArrayList<KeyValue> row,
 
 ```
 
-## 数据压缩：
+## 数据压缩
 
 
 
@@ -6030,11 +6022,12 @@ private KeyValue buildCompactedColumn(ByteBufferList compacted_qual,
 
 所以这里如果使用HbaseReplicaiton作备份的话，还得注意一下这一点
 
-# 8.Annonation:
+# 8.Annonation
 
 ## qualifier:
 
-net.opentsdb.meta.Annotation#getGlobalAnnotations
+> net.opentsdb.meta.Annotation#getGlobalAnnotations
+>
 
 ```
 if ((column.qualifier().length == 3 || column.qualifier().length == 5)
@@ -6100,7 +6093,11 @@ HTTP请求里面，可以是：
 
   第三个如果没有结束时间，就把结束时间取系统时间，setStartKey和StopKey，取出所有的qualfier，在判断qualifier是不是注释，这样很浪费流量啊！（批量加载不能只加载某个qualifier？）
 
-  ## 单条读取：
+
+
+## 单条读取
+
+
 
   ```
   public static Deferred<Annotation> getAnnotation(final TSDB tsdb, 
@@ -6213,7 +6210,7 @@ HTTP请求里面，可以是：
 }
 ```
 
-## 删除：
+## 删除
 
 直接一个请求
 
@@ -6232,7 +6229,7 @@ public Deferred<Object> delete(final TSDB tsdb) {
 }
 ```
 
-## 批量删除：
+## 批量删除
 
 tsdb的批量操作都是先scan再一条一条delete
 
@@ -6315,9 +6312,9 @@ tsdb的批量操作都是先scan再一条一条delete
 
 
 
-# 8.其他功能：
+# 8.其他功能
 
-## 插件的编写：
+## 插件的编写
 
 2.4RC2 UniqueIdWhitelistFilter可以作为参考
 
