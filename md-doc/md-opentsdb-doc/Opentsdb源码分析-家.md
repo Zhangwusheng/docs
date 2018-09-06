@@ -1,8 +1,8 @@
 备注：本文结合了网上的一些资料和源码分析的过程。主要参考了http://www.nosqlnotes.com/technotes/opentsdb-schema/系列文章。图解释的很清晰，但是缺少源码和数据计算逻辑。
 
-#  TSDB相关名词解释
+#  1. TSDB元数据
 
-## 什么是时序数据？
+## 1.1 什么是时序数据？
 
 Wiki中关于”**时间序列（Time Series）**“的定义： 
 
@@ -71,7 +71,7 @@ Wiki中关于”**时间序列（Time Series）**“的定义：
 
 
 
-## TSDB元数据模型
+## 1.2 TSDB元数据模型
 
 ### UID设计
 
@@ -208,7 +208,7 @@ if (enableApi) {
 
 
 
-### UID的生成：
+### UID的生成
 
 > net.opentsdb.uid.UniqueId#UniqueId(net.opentsdb.core.TSDB, byte[], java.lang.String, int, boolean)
 
@@ -253,13 +253,13 @@ ID的生成逻辑很简单：如果是随机数，那么就生成3个自己的�
 
 
 
-# 1.写流程
+# 2. 写流程
 
 Opentsdb数据的写入方式有两种：一种是通过Http或者Telnet实现单条或者多条数据的导入，一种是使用import实现数据的批量导入，首先分析HTTP请求的写入流程
 
 
 
-## 请求的解析
+## 2.1 请求的解析
 
 > net.opentsdb.tsd.PutDataPointRpc
 >
@@ -299,13 +299,31 @@ public <T extends IncomingDataPoint> void processDataPoint(final TSDB tsdb,
                 .addErrback(new PutErrback());
   }
 ```
-## RowKey的生成
+## 2.2 RowKey的生成
 
- addPoint：这里注意一下flags
+metrics数据的HBase RowKey中包含主要组成部分为：盐值（Salt）、metrics名称、时间戳、tagKey、tagValue等部分。为了统一各个值的长度以及节省空间，对metrics名称、tagKey和tagValue分配了UID信息。所以，在HBase RowKey中实际写入的metrics UID、tagKey UID和tagValue UID。
 
-long类型的flags：序列化为bytes数组的长度减一
-Double是
-  final short flags = Const.FLAG_FLOAT | 0x7;  // A float stored on 8 bytes.
+rowkey的格式：
+
+​	salt值（可配置）+3字节metrics +4字节整点时间戳+N*(3字节tagk编码+3字节tagv编码)
+
+值：
+
+​	分为float和long类型，数据类型通过设置到qualifier里面的flags来区分。
+
+ 
+
+数据的写入流程从addPoint函数开始：
+
+> net.opentsdb.core.TSDB#addPoint
+
+这里注意一下flags
+
+long类型的flags：
+
+	序列化为bytes数组的长度减一
+Double类型的flags：
+  	final short flags = Const.FLAG_FLOAT | 0x7;  // A float stored on 8 bytes.
 
 ```
 public Deferred<Object> addPoint(final String metric,
@@ -430,25 +448,22 @@ net.opentsdb.core.Tags
   
 ```
 
-## Qualifier的生成：
+## 2.3 Qualifier的生成
 
-net.opentsdb.core.Const
+> net.opentsdb.core.Const
+>
 
-```
+```java
 public static final short MS_FLAG_BITS = 6;
-  public static final int MS_FLAG = 0xF0000000;
-  public static final short MAX_TIMESPAN = 3600;
-    public static final short FLAG_BITS = 4;
+public static final int MS_FLAG = 0xF0000000;
+public static final short MAX_TIMESPAN = 3600;
+public static final short FLAG_BITS = 4;
 ```
 
-net.opentsdb.core.Internal#buildQualifier
-
-
+> net.opentsdb.core.Internal#buildQualifier
+>
 
 ```
-
-
-
 public static byte[] buildQualifier(final long timestamp, final short flags) {
   final long base_time;
   if ((timestamp & Const.SECOND_MASK) != 0) {
@@ -467,7 +482,7 @@ public static byte[] buildQualifier(final long timestamp, final short flags) {
 }
 ```
 
-## Salt的生成：
+## 2.4 Salt的生成
 
 1.分成固定的20个桶（SALT_BUCKETS=20）
 
@@ -517,9 +532,10 @@ public static void prefixKeyWithSalt(final byte[] row_key) {
   }
 ```
 
-## 数据保存：
+## 2.5 数据保存
 
-storeIntoDB
+> storeIntoDB
+>
 
 分为三步：
 
@@ -660,8 +676,6 @@ Append的QUALIFIER 就是0x050000
 
 或者处理普通模式：
 
-
-
 ```
 scheduleForCompaction(row, (int) base_time);
 final PutRequest point = RequestBuilder.buildPutRequest(config, table, row, FAMILY, qualifier, value, timestamp);
@@ -694,7 +708,7 @@ final void scheduleForCompaction(final byte[] row, final int base_time) {
 
 自己看把，代码也比较简单，和几个配置相关
 
-# 2.Qualifer的相关操作：
+# 2.Qualifer的相关操作
 
 1. Qualifer的生成：
 2. 比较
