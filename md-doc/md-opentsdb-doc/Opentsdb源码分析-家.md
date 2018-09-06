@@ -1,3 +1,5 @@
+备注：本文结合了网上的一些资料和源码分析的过程。主要参考了http://www.nosqlnotes.com/technotes/opentsdb-schema/系列文章。图解释的很清晰，但是缺少源码和数据计算逻辑。
+
 #  TSDB相关名词解释
 
 ## 什么是时序数据？
@@ -25,24 +27,128 @@ Wiki中关于”**时间序列（Time Series）**“的定义：
 
 **度量（metric）：**数据指标的类别，如发动机的温度、发动机转速、模拟量等。
 
-**域（field）：**在指定度量下数据的子类别。即一个metric支持多个field，如metric为wind，该metric可以有两个field：direction和speed。
-
 **时间戳（timestamp）：**数据产生的时间点。
 
-**数值（value）：**度量对应的数值，如56°C、1000r/s等（实际中不带单位）。如果有多个field，每个field都有相应的value。不同的field支持不同的数据类型写入。对于同一个field，如果写入了某个数据类型的value之后，相同的field不允许写入其他数据类型。
+**数值（value）：**度量对应的数值，如56°C、1000r/s等（实际中不带单位）。
 
 **标签（tag）：**一个标签是一个key-value对，用于提供额外的信息，如"设备号=95D8-7913"、“型号=ABC123”、“出厂编号=1234567890”等。
 
-**数据点（data point）：**“1个metric+1个field（可选）+1个timestamp+1个value + n个tag（n>=1）”唯一定义了一个数据点。当写入的metric、field、timestamp、n个tag都相同时，后写入的value会覆盖先写入的value。
+**数据点（data point）：**“1个metric+1个timestamp+1个value + n个tag（n>=1）”唯一定义了一个数据点。当写入的metric、timestamp、n个tag都相同时，后写入的value会覆盖先写入的value。
 
-**时间序列 ：**“1个metric+1个field（可选） +n个tag（n>=1）”定义了一个时间序列。单域和多域的数据点和时间序列由下图所示：
-
-
+**时间序列 ：**“1个metric +n个tag（n>=1）”定义了一个时间序列。单域和多域的数据点和时间序列由下图所示：
 
 
-标签个数限制：
 
-本身不加限制，但是实施时最好加上。
+如下是源自OpenTSDB官方资料中的**时序数据样例**： 
+
+> sys.cpu.user host=webserver01 1356998400 50 
+>
+> sys.cpu.user host=webserver01,cpu=0 1356998400 1 
+>
+> sys.cpu.user host=webserver01,cpu=1 1356998400 0 
+>
+> sys.cpu.user host=webserver01,cpu=2 1356998400 2 
+>
+> sys.cpu.user host=webserver01,cpu=3 1356998400 0 
+>
+> ………… 
+>
+> sys.cpu.user host=webserver01,cpu=63 1356998400 1 
+
+对于上面的任意一行数据，在OpenTSDB中称之为一个**时间序列**中的一个**Data Point**。以最后一行为例我们说明一下OpenTSDB中关于Data Point的每一部分组成定义如下： 
+
+|   构成信息   |   TSD名称   |
+| :----------: | :---------: |
+| sys.cpu.user | **metrics** |
+|     host     |   tagKey    |
+| webserver01  |  tagValue   |
+|     cpu      |   tagKey    |
+|      63      |  tagValue   |
+|  1356998400  |  timestamp  |
+|      1       |    value    |
+
+可以看出来，每一个Data Point，都关联一个metrics名称，但可能关联多组<tagKey,tagValue>信息。而关于时间序列，事实上就是具有相同的metrics名称以及相同的<tagKey,tagValue>组信息的Data Points的集合。在存储这些Data Points的时候，大家也很容易可以想到，可以将这些metrics名称以及<tagKey,tagValue>信息进行特殊编码来优化存储，否则会带来极大的数据冗余。OpenTSDB中为每一个metrics名称，tagKey以及tagValue都定义了一个唯一的数字类型的标识码(UID)。 
+
+
+
+## TSDB元数据模型
+
+### UID设计
+
+
+
+UID的全称为Unique Identifier。这些UID信息被保存在OpenTSDB的元数据表中，默认表名为”tsdb-uid”。 
+
+OpenTSDB分配UID时遵循如下规则： 
+
+- metrics、tagKey和tagValue的UID分别独立分配 
+- 每个metrics名称（tagKey/tagValue）的UID值都是唯一。不存在不同的metrics（tagKey/tagValue）使用相同的UID，也不存在同一个metrics（tagKey/tagValue）使用多个不同的UID 
+- UID值的范围是0x000000到0xFFFFFF，即metrics（或tagKey、tagValue）最多只能存在16777216个不同的值。  
+
+
+
+### 元数据HBase表设计
+
+为了从UID索引到metrics（或tagKey、tagValue），同时也要从metrics（或tagKey、tagValue）索引到UID，OpenTSDB同时保存这两种映射关系数据。 在元数据表中，把这两种数据分别保存到两个名为”id”与”name”的Column Family中，Column Family描述信息如下所示： 
+
+> {NAME => ‘id’, BLOOMFILTER => ‘ROW’, COMPRESSION => ‘SNAPPY’}
+>
+>  {NAME =>’name’,BLOOMFILTER => ‘ROW’, COMPRESSION => ‘SNAPPY’, MIN_VERSIONS => ‘0’, BLOCKCACHE => ‘true’, BLOCKSIZE => ‘65536’, REPLICATION_SCOPE => ‘0’} 
+
+下面为Hbase shell一段代码的执行过程：
+
+> hbase(main):009:0> scan 'tsdb-uid'
+> ROW                                        COLUMN+CELL     
+>
+>  \x00                                      column=id:metrics, timestamp=1530288910326, value=\x00\x00\x00\x00\x00\x00\x00\x12                                          
+>  \x00                                      column=id:tagk, timestamp=1529652270537, value=\x00\x00\x00\x00\x00\x00\x00\x0A                                             
+>  \x00                                      column=id:tagv, timestamp=1530288910343, value=\x00\x00\x00\x00\x00\x00\x00\x12    
+>
+> ​                                                                                                                                              \x00\x00\x01                              column=name:metrics, timestamp=1528879705241, value=sys.cpu.user                                                             \x00\x00\x01                              column=name:tagk, timestamp=1528879705280, value=host                                                                        \x00\x00\x01                              column=name:tagv, timestamp=1528879705313, value=web01                                                                       \x00\x00\x02                              column=name:metrics, timestamp=1528880100259, value=sys.cpu.sys                                                              \x00\x00\x02                              column=name:tagk, timestamp=1528879705347, value=user                                                                        \x00\x00\x02                              column=name:tagv, timestamp=1528879705377, value=10001                                                                       
+>
+> 10001                                     column=id:tagv, timestamp=1528879705387, value=\x00\x00\x02                                                                  host                                      column=id:tagk, timestamp=1528879705287, value=\x00\x00\x01                                                                  sys.cpu.sys                               column=id:metrics, timestamp=1528880100264, value=\x00\x00\x02                                                               sys.cpu.user                              column=id:metrics, timestamp=1528879705251, value=\x00\x00\x01                                                               user                                      column=id:tagk, timestamp=1528879705356, value=\x00\x00\x02                                                                  web01                                     column=id:tagv, timestamp=1528879705321, value=\x00\x00\x01                                                                  
+
+由于HBase的存储数据类型是Bytes，所以UID在存储时会被转换为3个字节长度的Bytes数组进行存储。 从上面的数据可以看出hbase是如何保存uid数据的。
+
+Opentsdb预留了rowkey 0x00作为特殊用途，用来生成metrics/tagk/tagv的UID；从上面数据可以看出，当前系统中共有0x12个metrics，0x0A个tagk，0x12个tagv。
+
+
+
+Opentsdb在生成metrics的UID时，有一个选项：
+
+- tsd.core.uid.random_metrics
+
+表示是否使用随机数来生成metrics的id，但是针对tagk和tagv都不是使用随机数的。
+
+这一点从下面的代码中可以看出：
+
+> net.opentsdb.core.TSDB#TSDB(org.hbase.async.HBaseClient, net.opentsdb.utils.Config)
+
+```java
+if (config.getBoolean("tsd.core.uid.random_metrics")) {
+  metrics = new UniqueId(this, uidtable, METRICS_QUAL, METRICS_WIDTH, true);
+} else {
+  metrics = new UniqueId(this, uidtable, METRICS_QUAL, METRICS_WIDTH, false);
+}
+tag_names = new UniqueId(this, uidtable, TAG_NAME_QUAL, TAG_NAME_WIDTH, false);
+tag_values = new UniqueId(this, uidtable, TAG_VALUE_QUAL, TAG_VALUE_WIDTH, false);
+```
+
+另外，UniqueId类也不是代表了单独的一个ID ，而是对所有的ID的管理，实现了UniqueId的CRUD，所以UniqueId应该叫UniqueIdS才对，而net.opentsdb.tools.UidManager则是提供了几个工具命令来实现UID的某些操作，比如grep，assign，rename，delete(metrics/tag)，fsck，metasync等，所以UidManager应该叫UidTool才对。
+
+### TSUID
+
+对每一个Data Point，metrics、timestamp、tagKey和tagValue都是必要的构成元素。除timestamp外，metrics、tagKey和tagValue的UID就可组成一个TSUID，每一个TSUID关联一个**时间序列**，如下所示： 
+
+> *<metrics_UID><tagKey1_UID><tagValue1_UID>[…<tagKeyN_UID><tagValueN_UID>]* 
+
+TSDB在生成TSUID时，针对TagKey按照tagk的UID进行了二进制排序。理论上，TSUID的全集就是所有的tagk的所有的tagv的uid的排列。可以了解为关系数据库里面所有列的所有值的组合。
+
+
+
+### TSDB的标签个数限制
+
+本身不加限制，但是实施时最好加上。超过8个标签会有性能上的问题。
 
 ```
 if (config.hasProperty("tsd.storage.max_tags")) {
@@ -67,6 +173,19 @@ static void setMaxNumTags(final short tags) {
 }
 ```
 
+Metrics/tagk/tagv的字节都是三个：
+
+```
+private static final String METRICS_QUAL = "metrics";
+private static short METRICS_WIDTH = 3;
+private static final String TAG_NAME_QUAL = "tagk";
+private static short TAG_NAME_WIDTH = 3;
+private static final String TAG_VALUE_QUAL = "tagv";
+private static short TAG_VALUE_WIDTH = 3;
+```
+
+
+
 net.opentsdb.tsd.RpcManager#initializeBuiltinRpcs
 
 ```
@@ -89,8 +208,56 @@ if (enableApi) {
 
 
 
+### UID的生成：
+
+> net.opentsdb.uid.UniqueId#UniqueId(net.opentsdb.core.TSDB, byte[], java.lang.String, int, boolean)
+
+```
+/** Generates either a random or a serial ID. If random, we need to
+ * make sure that there isn't a UID collision.
+ */
+private Deferred<Long> allocateUid() {
+  LOG.info("Creating " + (randomize_id ? "a random " : "an ") + 
+      "ID for kind='" + kind() + "' name='" + name + '\'');
+
+  state = CREATE_REVERSE_MAPPING;
+  if (randomize_id) {
+    return Deferred.fromResult(RandomUniqueId.getRandomUID());
+  } else {
+    return client.atomicIncrement(new AtomicIncrementRequest(table, 
+                                  MAXID_ROW, ID_FAMILY, kind));
+  }
+}
+
+public static long getRandomUID(final int width) {
+    if (width > MAX_WIDTH) {
+      throw new IllegalArgumentException("Expecting to return an unsigned long "
+          + "random integer, it can not be larger than " + MAX_WIDTH + 
+          " bytes wide");
+    }
+    final byte[] bytes = new byte[width];
+    random_generator.nextBytes(bytes);
+
+    long value = 0;
+    for (int i = 0; i<bytes.length; i++){
+      value <<= 8;
+      value |= bytes[i] & 0xFF;
+    }
+
+    // make sure we never return 0 as a UID
+    return value != 0 ? value : value + 1;
+  }
+```
+
+ID的生成逻辑很简单：如果是随机数，那么就生成3个自己的随机数；如果不是，那么就对uid表对一个的列发起一个AtomicIncrementRequest操作，实现ID的递增目的；
+
+
 
 # 1.写流程
+
+Opentsdb数据的写入方式有两种：一种是通过Http或者Telnet实现单条或者多条数据的导入，一种是使用import实现数据的批量导入，首先分析HTTP请求的写入流程
+
+
 
 ## 请求的解析
 
