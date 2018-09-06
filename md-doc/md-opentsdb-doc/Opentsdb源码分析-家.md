@@ -1,3 +1,5 @@
+[TOC]
+
 备注：本文结合了网上的一些资料和源码分析的过程。主要参考了http://www.nosqlnotes.com/technotes/opentsdb-schema/系列文章。图解释的很清晰，但是缺少源码和数据计算逻辑。
 
 #  1. TSDB元数据
@@ -6312,7 +6314,7 @@ tsdb的批量操作都是先scan再一条一条delete
 
 
 
-# 8.其他功能
+# 9.其他功能
 
 ## 插件的编写
 
