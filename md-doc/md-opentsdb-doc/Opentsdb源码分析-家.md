@@ -251,6 +251,178 @@ public static long getRandomUID(final int width) {
 
 ID的生成逻辑很简单：如果是随机数，那么就生成3个自己的随机数；如果不是，那么就对uid表对一个的列发起一个AtomicIncrementRequest操作，实现ID的递增目的；
 
+### Qualifier的设计
+
+Qualifier用于保存一个或多个DataPoint中的时间戳、数据类型、数据长度等信息。
+
+由于时间戳中的小时级别的信息已经保存在RowKey中了，所以Qualifier只需要保存一个小时中具体某秒或某毫秒的信息即可，这样可以减少数据占用的空间。
+
+一个小时中的某一秒（少于3600）最多需要2个字节即可表示，而某一毫秒（少于3600000）最多需要4个字节才可以表示。为了节省空间，OpenTSDB没有使用统一的长度，而是对特定的类型采用特性的编码方法。Qualifer的数据模型主要分为如下三种情况：秒、毫秒、秒和毫秒混合。
+
+
+
+### 秒类型
+
+当OpenTSDB接收到一个新的DataPoint的时候，如果请求中的时间戳是秒，那么就会插入一个如下模型的数据。
+
+判断请求中的时间戳为秒或毫秒的方法是基于时间戳数值的大小，如果时间戳的值的超过无符号整数的最大值（即4个字节的长度），那么该时间戳是毫秒，否则为秒。
+
+![Qualifier-Second](/Users/zhangwusheng/Documents/GitHub/docs/md-doc/md-opentsdb-doc/Qualifier-Second.png)
+
+- Value长度：Value的实际长度是Qualifier的最后3个bit的值加1，即(qualifier & 0x07) + 1。表示该时间戳对应的值的字节数。所以，值的字节数的范围是1到8个字节。
+- Value类型：Value的类型由Qualifier的倒数第4个bit表示，即(qualifier & 0x08)。如果值为1，表示Value的类型为float；如果值为0，表示Value的类型为long。
+- 时间戳：时间戳的值由Qualifier的第1到第12个bit表示，即(qualifier & 0xFFF0) >>>4。由于秒级的时间戳最大值不会大于3600，所以qualifer的第1个bit肯定不会是1。
+
+### 毫秒类型
+
+当OpenTSDB接收到一个新的DataPoint的时候，如果请求中的时间戳是毫秒，那么就会插入一个如下模型的数据。
+
+![Qualifier-milisecond](/Users/zhangwusheng/Documents/GitHub/docs/md-doc/md-opentsdb-doc/Qualifier-milisecond.png)
+
+- Value长度：与秒类型相同。
+- Value类型：与秒类型相同。
+- 时间戳： 时间戳的值由Qualifier的第5到第26个bit表示，即(qualifier & 0x0FFFFFC0) >>>6。
+- 标志位：标志位由Qualifier的前4个bit表示。当该Qualifier表示毫秒级数据时，必须全为1，即(qualifier[0] & 0xF0) == 0xF0。
+- 第27到28个bit未使用。
+
+### 混合类型
+
+当同一小时的数据发生合并后，就会形成混合类型的Qualifier。
+
+合并的方法很简单，就是按照时间戳顺序进行排序后，从小到大依次拼接秒类型和毫秒类型的Qualifier即可。
+
+![Qualifier-mix](/Users/zhangwusheng/Documents/GitHub/docs/md-doc/md-opentsdb-doc/Qualifier-mix.png)
+
+- 秒类型和毫秒类型的数量没有限制，并且可以任意组合。
+- 不存在相同时间戳的数据，包括秒和毫秒的表示方式。
+- 遍历混合类型中的所有DataPoint的方法是：
+  - 从左到右，先判断前4个bit是否为0xF
+  - 如果是，则当前DataPoint是毫秒型的，读取4个字节形成一个毫秒型的DataPoint
+  - 如果否，则当前DataPoint是秒型的，读取2个字节形成一个秒型的DataPoint
+  - 以此迭代即可遍历所有的DataPoint
+
+
+
+
+
+> net.opentsdb.core.Const
+
+```java
+public static final short MS_FLAG_BITS = 6;
+public static final int MS_FLAG = 0xF0000000;
+public static final short MAX_TIMESPAN = 3600;
+public static final short FLAG_BITS = 4;
+```
+
+> net.opentsdb.core.Internal#buildQualifier
+
+long类型的flags：
+
+	序列化为bytes数组的长度减一
+Double类型的flags：
+  	final short flags = Const.FLAG_FLOAT | 0x7;  // A float stored on 8 bytes.
+
+```
+public static byte[] buildQualifier(final long timestamp, final short flags) {
+  final long base_time;
+  if ((timestamp & Const.SECOND_MASK) != 0) {
+    // drop the ms timestamp to seconds to calculate the base timestamp
+    base_time = ((timestamp / 1000) - ((timestamp / 1000) 
+        % Const.MAX_TIMESPAN));
+    final int qual = (int) (((timestamp - (base_time * 1000) 
+        << (Const.MS_FLAG_BITS)) | flags) | Const.MS_FLAG);
+    return Bytes.fromInt(qual);
+  } else {
+    base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
+    final short qual = (short) ((timestamp - base_time) << Const.FLAG_BITS
+        | flags);
+    return Bytes.fromShort(qual);
+  }
+}
+```
+
+
+
+- 比较
+
+实际操作是，判断Qualifier代表的是秒（2字节）还是毫秒（4字节），还原成整形，规整为毫秒数，比较毫秒数的大小，这个毫秒数叫offset，这个offset就是基于rowkey里面的整小时的offset。秒最多是3600秒，所以两个字节就够了。
+
+```
+/**
+ * Compares two data point byte arrays with offsets.
+ * Can be used on:
+ * <ul><li>Single data point columns</li>
+ * <li>Compacted columns</li></ul>
+ * <b>Warning:</b> Does not work on Annotation or other columns
+ * @param a The first byte array to compare
+ * @param offset_a An offset for a
+ * @param b The second byte array
+ * @param offset_b An offset for b
+ * @return 0 if they have the same timestamp, -1 if a is less than b, 1 
+ * otherwise.
+ * @since 2.0
+ */
+public static int compareQualifiers(final byte[] a, final int offset_a, 
+    final byte[] b, final int offset_b) {
+  final long left = Internal.getOffsetFromQualifier(a, offset_a);
+  final long right = Internal.getOffsetFromQualifier(b, offset_b);
+  if (left == right) {
+    return 0;
+  }
+  return (left < right) ? -1 : 1;
+}
+```
+
+```
+/**
+ * Returns the offset in milliseconds from the row base timestamp from a data
+ * point qualifier at the given offset (for compacted columns)
+ * @param qualifier The qualifier to parse
+ * @param offset An offset within the byte array
+ * @return The offset in milliseconds from the base time
+ * @throws IllegalDataException if the qualifier is null or the offset falls 
+ * outside of the qualifier array
+ * @since 2.0
+ */
+public static int getOffsetFromQualifier(final byte[] qualifier, 
+    final int offset) {
+  validateQualifier(qualifier, offset);
+  if ((qualifier[offset] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
+    return (int)(Bytes.getUnsignedInt(qualifier, offset) & 0x0FFFFFC0) 
+      >>> Const.MS_FLAG_BITS;
+  } else {
+    final int seconds = (Bytes.getUnsignedShort(qualifier, offset) & 0xFFFF) 
+      >>> Const.FLAG_BITS;
+    return seconds * 1000;
+  }
+}
+```
+
+- 获取数据长度（数据的长度保存在Qualifier里面）
+
+```
+/**
+ * Returns the length of the value, in bytes, parsed from the qualifier
+ * @param qualifier The qualifier to parse
+ * @param offset An offset within the byte array
+ * @return The length of the value in bytes, from 1 to 8.
+ * @throws IllegalArgumentException if the qualifier is null or the offset falls
+ * outside of the qualifier array
+ * @since 2.0
+ */
+public static byte getValueLengthFromQualifier(final byte[] qualifier, 
+    final int offset) {
+  validateQualifier(qualifier, offset);    
+  short length;
+  if ((qualifier[offset] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
+    length = (short) (qualifier[offset + 3] & Internal.LENGTH_MASK); 
+  } else {
+    length = (short) (qualifier[offset + 1] & Internal.LENGTH_MASK);
+  }
+  return (byte) (length + 1);
+}
+```
+
 
 
 # 2. 写流程
@@ -448,41 +620,9 @@ net.opentsdb.core.Tags
   
 ```
 
-## 2.3 Qualifier的生成
+## 
 
-> net.opentsdb.core.Const
->
-
-```java
-public static final short MS_FLAG_BITS = 6;
-public static final int MS_FLAG = 0xF0000000;
-public static final short MAX_TIMESPAN = 3600;
-public static final short FLAG_BITS = 4;
-```
-
-> net.opentsdb.core.Internal#buildQualifier
->
-
-```
-public static byte[] buildQualifier(final long timestamp, final short flags) {
-  final long base_time;
-  if ((timestamp & Const.SECOND_MASK) != 0) {
-    // drop the ms timestamp to seconds to calculate the base timestamp
-    base_time = ((timestamp / 1000) - ((timestamp / 1000) 
-        % Const.MAX_TIMESPAN));
-    final int qual = (int) (((timestamp - (base_time * 1000) 
-        << (Const.MS_FLAG_BITS)) | flags) | Const.MS_FLAG);
-    return Bytes.fromInt(qual);
-  } else {
-    base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
-    final short qual = (short) ((timestamp - base_time) << Const.FLAG_BITS
-        | flags);
-    return Bytes.fromShort(qual);
-  }
-}
-```
-
-## 2.4 Salt的生成
+## 2.3 Salt的生成
 
 1.分成固定的20个桶（SALT_BUCKETS=20）
 
@@ -532,7 +672,7 @@ public static void prefixKeyWithSalt(final byte[] row_key) {
   }
 ```
 
-## 2.5 数据保存
+## 2.4 数据保存
 
 > storeIntoDB
 >
@@ -704,92 +844,9 @@ final void scheduleForCompaction(final byte[] row, final int base_time) {
 }
 ```
 
-## 时间线元数据的梳理
+## 2.5 时间线元数据的梳理
 
 自己看把，代码也比较简单，和几个配置相关
-
-# 2.Qualifer的相关操作
-
-1. Qualifer的生成：
-2. 比较
-
-实际操作是，判断Qualifier代表的是秒（2字节）还是毫秒（4字节），还原成整形，规整为毫秒数，比较毫秒数的大小，这个毫秒数叫offset，这个offset就是基于rowkey里面的整小时的offset。秒最多是3600秒，所以两个字节就够了。
-
-```
-/**
- * Compares two data point byte arrays with offsets.
- * Can be used on:
- * <ul><li>Single data point columns</li>
- * <li>Compacted columns</li></ul>
- * <b>Warning:</b> Does not work on Annotation or other columns
- * @param a The first byte array to compare
- * @param offset_a An offset for a
- * @param b The second byte array
- * @param offset_b An offset for b
- * @return 0 if they have the same timestamp, -1 if a is less than b, 1 
- * otherwise.
- * @since 2.0
- */
-public static int compareQualifiers(final byte[] a, final int offset_a, 
-    final byte[] b, final int offset_b) {
-  final long left = Internal.getOffsetFromQualifier(a, offset_a);
-  final long right = Internal.getOffsetFromQualifier(b, offset_b);
-  if (left == right) {
-    return 0;
-  }
-  return (left < right) ? -1 : 1;
-}
-```
-
-```
-/**
- * Returns the offset in milliseconds from the row base timestamp from a data
- * point qualifier at the given offset (for compacted columns)
- * @param qualifier The qualifier to parse
- * @param offset An offset within the byte array
- * @return The offset in milliseconds from the base time
- * @throws IllegalDataException if the qualifier is null or the offset falls 
- * outside of the qualifier array
- * @since 2.0
- */
-public static int getOffsetFromQualifier(final byte[] qualifier, 
-    final int offset) {
-  validateQualifier(qualifier, offset);
-  if ((qualifier[offset] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
-    return (int)(Bytes.getUnsignedInt(qualifier, offset) & 0x0FFFFFC0) 
-      >>> Const.MS_FLAG_BITS;
-  } else {
-    final int seconds = (Bytes.getUnsignedShort(qualifier, offset) & 0xFFFF) 
-      >>> Const.FLAG_BITS;
-    return seconds * 1000;
-  }
-}
-```
-
-3. 获取数据长度（数据的长度保存在Qualifier里面）
-
-```
-/**
- * Returns the length of the value, in bytes, parsed from the qualifier
- * @param qualifier The qualifier to parse
- * @param offset An offset within the byte array
- * @return The length of the value in bytes, from 1 to 8.
- * @throws IllegalArgumentException if the qualifier is null or the offset falls
- * outside of the qualifier array
- * @since 2.0
- */
-public static byte getValueLengthFromQualifier(final byte[] qualifier, 
-    final int offset) {
-  validateQualifier(qualifier, offset);    
-  short length;
-  if ((qualifier[offset] & Const.MS_BYTE_FLAG) == Const.MS_BYTE_FLAG) {
-    length = (short) (qualifier[offset + 3] & Internal.LENGTH_MASK); 
-  } else {
-    length = (short) (qualifier[offset + 1] & Internal.LENGTH_MASK);
-  }
-  return (byte) (length + 1);
-}
-```
 
 
 
